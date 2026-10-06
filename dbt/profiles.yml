@@ -1,0 +1,22 @@
+# Two places dbt can build the warehouse:
+#   dev  = DuckDB on your laptop (free, fast, for practice):  dbt build
+#   prod = Databricks Free Edition in the cloud:               dbt build --target prod
+#
+# Databricks secrets come from environment variables, NEVER typed into this file.
+# See SETUP_GUIDE.md Part B for how to set them.
+college_roi:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: ../warehouse/college.duckdb
+      threads: 4
+
+    prod:
+      type: databricks
+      catalog: workspace
+      schema: analytics
+      host: "{{ env_var('DATABRICKS_HOST') }}"
+      http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
+      token: "{{ env_var('DATABRICKS_TOKEN') }}"
+      threads: 4

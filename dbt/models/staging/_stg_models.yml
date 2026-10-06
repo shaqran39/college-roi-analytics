@@ -1,0 +1,35 @@
+version: 2
+
+models:
+  - name: stg_graduates
+    description: One row per graduate, cleaned and renamed. Selectivity is capped at 100 (288 raw rows were above 100).
+    columns:
+      - name: grad_id
+        description: Primary key
+        data_tests:
+          - unique
+          - not_null
+      - name: major
+        data_tests:
+          - not_null
+      - name: major_category
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['STEM', 'business', 'social_science', 'health', 'humanities', 'arts', 'education']
+      - name: institution_tier
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['ivy_elite', 'top_public', 'mid_tier', 'regional', 'for_profit']
+      - name: region
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['northeast', 'south', 'midwest', 'west']
+      - name: selectivity_pctile
+        description: Institution selectivity percentile, capped at 100
+      - name: is_selectivity_capped
+        description: True if the raw value was above 100 and got capped
+      - name: net_roi_usd
+        description: 10-year earnings gain over a high-school baseline, minus net cost

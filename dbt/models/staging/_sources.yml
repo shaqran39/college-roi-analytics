@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: college
+    description: Raw graduate outcomes data loaded from college_major_roi.csv
+    schema: raw
+    tables:
+      - name: college_major_roi
+        description: One row per graduate. Cost, debt and 10-year earnings vs a high-school baseline.
