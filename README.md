@@ -35,10 +35,13 @@ Scheduled with Databricks Jobs. Built with Claude Code as AI pair-engineer.
 | AI in the pipeline | Writes a short verdict per major ("high cost, but pays back fast if you intern") | Databricks `ai_query` |
 | AI in the product | Summarises the key findings, plus an ask-a-question box on the dashboard | Databricks `ai_query` |
 
+Column definitions: [data_dictionary.csv](data_dictionary.csv)
+
 ## Data quality
 | Issue found | Fix |
 |---|---|
 | 288 rows have selectivity percentile above 100 | Capped at 100 in `stg_graduates`, flagged with `is_selectivity_capped` |
+| Money columns are each rounded to the nearest $100, so the dictionary formulas (baseline + added = earnings, added − cost = net ROI) are off by exactly $100 in ~7,500 rows each | Expected, not an error. Custom test allows a $100 difference |
 
 ## Stack
 | Layer | Tool |
@@ -51,7 +54,7 @@ Scheduled with Databricks Jobs. Built with Claude Code as AI pair-engineer.
 
 ## Roadmap
 - [x] Phase 0: Project scaffold
-- [ ] Phase 1: Load raw data into Databricks
+- [x] Phase 1: Load raw data into Databricks
 - [x] Phase 2: Staging model + tests (`stg_graduates`)
 - [ ] Phase 3: Intermediate models
 - [ ] Phase 4: Marts (star schema + summary tables)

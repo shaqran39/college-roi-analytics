@@ -9,6 +9,7 @@ data/raw/*
 warehouse/*
 !warehouse/.gitkeep
 *.csv
+!data_dictionary.csv
 *.parquet
 *.duckdb
 *.duckdb.wal

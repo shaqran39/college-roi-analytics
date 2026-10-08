@@ -1,0 +1,38 @@
+version: 2
+
+models:
+  - name: int_graduates_enriched
+    description: >
+      One row per graduate. All stg_graduates columns plus yearly earnings,
+      debt-to-earnings ratio, payback years and an ROI band for grouping in marts and the dashboard.
+    columns:
+      - name: grad_id
+        description: Primary key
+        data_tests:
+          - unique
+          - not_null
+      - name: avg_annual_earnings_usd
+        description: Average yearly earnings over the 10 years (earnings_10yr_usd / 10)
+      - name: avg_annual_added_earnings_usd
+        description: Average yearly earnings above the high-school baseline (added_earnings_10yr_usd / 10)
+      - name: has_debt
+        description: True if the graduate took on any student debt
+        data_tests:
+          - not_null
+      - name: debt_to_annual_earnings_ratio
+        description: Debt divided by average yearly earnings. 0.5 = debt equals half a year's pay. 0 = no debt
+        data_tests:
+          - not_null
+      - name: payback_years
+        description: Years of the yearly earnings premium needed to earn back the net cost. Under 10 = paid off within the 10 years
+        data_tests:
+          - not_null
+      - name: roi_band
+        description: >
+          negative (net ROI <= 0), low (under $200k), medium ($200k up to the top quartile),
+          high (top quartile, same as is_high_roi)
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['negative', 'low', 'medium', 'high']
