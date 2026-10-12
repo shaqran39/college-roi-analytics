@@ -1,0 +1,49 @@
+version: 2
+
+models:
+  - name: mart_roi_by_major
+    description: >
+      One row per major. Does this major pay off over 10 years? Typical net ROI,
+      the share of grads in each ROI band, payback time and debt load. Feeds the dashboard.
+    columns:
+      - name: major
+        description: Major name. Primary key
+        data_tests:
+          - unique
+          - not_null
+      - name: grad_count
+        description: Number of graduates with this major
+        data_tests:
+          - not_null
+      - name: median_net_roi_usd
+        description: Median 10-year net ROI (extra earnings vs high school, minus net cost), USD
+        data_tests:
+          - not_null
+      - name: pct_roi_negative
+        description: "% of grads with net ROI <= 0 (worse off than skipping college)"
+        data_tests:
+          - not_null
+      - name: pct_roi_low
+        description: "% of grads with a positive net ROI under $200k"
+        data_tests:
+          - not_null
+      - name: pct_roi_medium
+        description: "% of grads with net ROI from $200k up to the top-quartile cut-off"
+        data_tests:
+          - not_null
+      - name: pct_roi_high
+        description: "% of grads in the top quartile of net ROI (is_high_roi)"
+        data_tests:
+          - not_null
+      - name: median_payback_years
+        description: Median years of yearly earnings premium needed to earn back the net cost. Under 10 = paid back within the window
+        data_tests:
+          - not_null
+      - name: pct_not_paid_back_10yr
+        description: "% of grads whose payback_years is over 10 (not paid back within the 10 years)"
+        data_tests:
+          - not_null
+      - name: median_debt_to_earnings_ratio
+        description: Median of debt divided by average yearly earnings. 0.5 = debt equals half a year's pay
+        data_tests:
+          - not_null
