@@ -47,3 +47,111 @@ models:
         description: Median of debt divided by average yearly earnings. 0.5 = debt equals half a year's pay
         data_tests:
           - not_null
+
+  - name: mart_roi_by_tier
+    description: >
+      One row per institution tier. Same pay-off metrics as mart_roi_by_major,
+      plus median net cost and median debt. Feeds the dashboard.
+    columns:
+      - name: institution_tier
+        description: Institution tier. Primary key
+        data_tests:
+          - unique
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['ivy_elite', 'top_public', 'mid_tier', 'regional', 'for_profit']
+      - name: grad_count
+        description: Number of graduates from this tier
+        data_tests:
+          - not_null
+      - name: median_net_roi_usd
+        description: Median 10-year net ROI (extra earnings vs high school, minus net cost), USD
+        data_tests:
+          - not_null
+      - name: pct_roi_negative
+        description: "% of grads with net ROI <= 0 (worse off than skipping college)"
+        data_tests:
+          - not_null
+      - name: pct_roi_low
+        description: "% of grads with a positive net ROI under $200k"
+        data_tests:
+          - not_null
+      - name: pct_roi_medium
+        description: "% of grads with net ROI from $200k up to the top-quartile cut-off"
+        data_tests:
+          - not_null
+      - name: pct_roi_high
+        description: "% of grads in the top quartile of net ROI (is_high_roi)"
+        data_tests:
+          - not_null
+      - name: median_payback_years
+        description: Median years of yearly earnings premium needed to earn back the net cost
+        data_tests:
+          - not_null
+      - name: pct_not_paid_back_10yr
+        description: "% of grads whose payback_years is over 10"
+        data_tests:
+          - not_null
+      - name: median_net_cost_usd
+        description: Median net cost of college after grants and aid, USD
+        data_tests:
+          - not_null
+      - name: median_debt_usd
+        description: Median student debt, USD. Includes grads with no debt
+        data_tests:
+          - not_null
+      - name: median_debt_to_earnings_ratio
+        description: Median of debt divided by average yearly earnings
+        data_tests:
+          - not_null
+
+  - name: mart_choices_effect
+    description: >
+      One row per major category x choice x yes/no. Compares grads with vs without an internship,
+      and on-time vs late finishers. major_category = 'all' covers every grad.
+      Shows how outcomes differ between groups; it does not prove the choice caused the difference.
+    columns:
+      - name: choice_group_id
+        description: Row key, e.g. STEM-internship-yes
+        data_tests:
+          - unique
+          - not_null
+      - name: major_category
+        description: Major category, or 'all' for every grad
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['STEM', 'business', 'social_science', 'health', 'humanities', 'arts', 'education', 'all']
+      - name: choice
+        description: Which choice is compared
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['internship', 'on_time_completion']
+      - name: made_choice
+        description: True = did an internship / finished on time. False = didn't / finished late
+        data_tests:
+          - not_null
+      - name: grad_count
+        description: Number of graduates in this group
+        data_tests:
+          - not_null
+      - name: median_net_roi_usd
+        description: Median 10-year net ROI, USD
+        data_tests:
+          - not_null
+      - name: pct_roi_negative
+        description: "% of grads with net ROI <= 0"
+        data_tests:
+          - not_null
+      - name: median_payback_years
+        description: Median years to earn back the net cost
+        data_tests:
+          - not_null
+      - name: net_roi_lift_usd
+        description: >
+          Only on made_choice = true rows: median net ROI minus the matching made_choice = false row.
+          Null on the false rows
