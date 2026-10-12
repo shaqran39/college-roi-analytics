@@ -56,7 +56,7 @@ Column definitions: [data_dictionary.csv](data_dictionary.csv)
 - [x] Phase 0: Project scaffold
 - [x] Phase 1: Load raw data into Databricks
 - [x] Phase 2: Staging model + tests (`stg_graduates`)
-- [ ] Phase 3: Intermediate models
+- [x] Phase 3: Intermediate models
 - [ ] Phase 4: Marts (star schema + summary tables)
 - [ ] Phase 5: AI report cards + insights
 - [ ] Phase 6: Public Streamlit dashboard
