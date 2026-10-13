@@ -1,0 +1,126 @@
+version: 2
+
+models:
+  - name: dim_major
+    description: One row per major, with its major category. Dimension for fct_graduate_outcomes
+    columns:
+      - name: major
+        description: Major name. Primary key
+        data_tests:
+          - unique
+          - not_null
+      - name: major_category
+        description: Broad group the major belongs to (STEM, business, ...)
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['STEM', 'business', 'social_science', 'health', 'humanities', 'arts', 'education']
+
+  - name: dim_institution_tier
+    description: One row per institution tier. Dimension for fct_graduate_outcomes
+    columns:
+      - name: institution_tier
+        description: Institution tier. Primary key
+        data_tests:
+          - unique
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['ivy_elite', 'top_public', 'mid_tier', 'regional', 'for_profit']
+      - name: tier_sort_order
+        description: 1 = ivy_elite ... 5 = for_profit. Use to order tiers in charts
+        data_tests:
+          - unique
+          - not_null
+
+  - name: dim_region
+    description: One row per US region. Dimension for fct_graduate_outcomes
+    columns:
+      - name: region
+        description: Region name. Primary key
+        data_tests:
+          - unique
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['northeast', 'south', 'midwest', 'west']
+
+  - name: fct_graduate_outcomes
+    description: >
+      One row per graduate. The centre of the star schema: costs, debt, earnings and ROI measures,
+      plus keys to dim_major, dim_institution_tier and dim_region.
+    columns:
+      - name: grad_id
+        description: Primary key
+        data_tests:
+          - unique
+          - not_null
+      - name: major
+        description: Foreign key to dim_major
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_major')
+                field: major
+      - name: institution_tier
+        description: Foreign key to dim_institution_tier
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_institution_tier')
+                field: institution_tier
+      - name: region
+        description: Foreign key to dim_region
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_region')
+                field: region
+      - name: gpa
+        description: College GPA (0-4)
+      - name: selectivity_pctile
+        description: Institution selectivity percentile, capped at 100
+      - name: is_selectivity_capped
+        description: True if the raw selectivity was above 100 and got capped
+      - name: has_internship
+        description: True if the graduate did an internship
+      - name: is_completed_on_time
+        description: True if the graduate finished their degree on time
+      - name: net_cost_usd
+        description: Net cost of college after grants and aid
+      - name: debt_usd
+        description: Student debt at graduation
+      - name: hs_baseline_10yr_usd
+        description: Estimated 10-year earnings with only a high-school diploma
+      - name: added_earnings_10yr_usd
+        description: 10-year earnings above the high-school baseline
+      - name: earnings_10yr_usd
+        description: Total 10-year earnings
+      - name: net_roi_usd
+        description: Added 10-year earnings minus net cost
+        data_tests:
+          - not_null
+      - name: roi_pct
+        description: Net ROI as a percentage of net cost
+      - name: avg_annual_earnings_usd
+        description: Average yearly earnings over the 10 years
+      - name: has_debt
+        description: True if the graduate took on any student debt
+      - name: debt_to_annual_earnings_ratio
+        description: Debt divided by average yearly earnings
+      - name: payback_years
+        description: Years of yearly earnings premium needed to earn back the net cost
+      - name: roi_band
+        description: negative, low, medium or high (see int_graduates_enriched)
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['negative', 'low', 'medium', 'high']
+      - name: is_positive_roi
+        description: True if net ROI is above 0
+      - name: is_high_roi
+        description: True if net ROI is in the top quartile
