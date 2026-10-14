@@ -8,6 +8,13 @@ model-paths: ["models"]
 test-paths: ["tests"]
 macro-paths: ["macros"]
 
+vars:
+  # Databricks model endpoint used by ai_query (prod only)
+  ai_model_endpoint: databricks-meta-llama-3-3-70b-instruct
+  # Majors to send to the AI when testing, e.g. --vars "{report_card_majors: ['nursing']}".
+  # Empty = all majors
+  report_card_majors: []
+
 models:
   college_roi:
     staging:
