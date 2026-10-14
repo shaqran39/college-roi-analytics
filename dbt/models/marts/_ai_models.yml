@@ -1,0 +1,79 @@
+version: 2
+
+# AI-written marts. Built only on the prod target (Databricks ai_query).
+
+models:
+  - name: mart_major_report_cards
+    description: >
+      One row per major. A plain-English verdict on whether the major pays off: a rule-based takeaway,
+      then 2 sentences written by Databricks ai_query using only that major's numbers from mart_roi_by_major.
+      Australian English. Prod only. Feeds the dashboard.
+    columns:
+      - name: major
+        description: Major name. Primary key
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('mart_roi_by_major')
+                field: major
+      - name: grad_count
+        description: Number of graduates with this major (from mart_roi_by_major)
+      - name: median_net_roi_usd
+        description: Median 10-year net ROI, USD (from mart_roi_by_major)
+      - name: pct_roi_negative
+        description: "% of grads with net ROI <= 0 (from mart_roi_by_major)"
+      - name: pct_roi_high
+        description: "% of grads in the top quartile of net ROI (from mart_roi_by_major)"
+      - name: median_payback_years
+        description: Median years to earn back the net cost (from mart_roi_by_major)
+      - name: pct_not_paid_back_10yr
+        description: "% of grads not paid back within 10 years (from mart_roi_by_major)"
+      - name: median_debt_to_earnings_ratio
+        description: Median debt divided by average yearly earnings (from mart_roi_by_major)
+      - name: takeaway
+        description: >
+          Rule-based label (not AI). Loss for the typical grad = Financially risky; 25%+ worse off = A mixed bet;
+          typical gain US$300k+ = A strong financial bet; US$100k+ = A solid choice; otherwise A modest payoff
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['Financially risky.', 'A mixed bet.', 'A strong financial bet.', 'A solid choice.', 'A modest payoff.']
+      - name: verdict
+        description: The takeaway followed by 2 AI-written sentences that back it up with the numbers
+        data_tests:
+          - not_null
+      - name: model_endpoint
+        description: Databricks model endpoint that wrote the verdict
+        data_tests:
+          - not_null
+      - name: generated_at
+        description: When the verdict was generated
+
+  - name: mart_key_findings
+    description: >
+      One row. An AI-written summary paragraph of the whole project, from a fact sheet built
+      from mart_roi_by_major, mart_roi_by_tier and mart_choices_effect. input_facts holds the exact
+      facts sent to the model, so the paragraph can be checked. Prod only. Feeds the dashboard.
+    columns:
+      - name: finding_id
+        description: Always 1. Primary key
+        data_tests:
+          - unique
+          - not_null
+      - name: summary_paragraph
+        description: AI-written 4-6 sentence summary
+        data_tests:
+          - not_null
+      - name: input_facts
+        description: The fact sheet sent to the model (the only numbers it was allowed to use)
+        data_tests:
+          - not_null
+      - name: model_endpoint
+        description: Databricks model endpoint that wrote the summary
+        data_tests:
+          - not_null
+      - name: generated_at
+        description: When the summary was generated
