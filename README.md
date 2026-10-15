@@ -1,10 +1,10 @@
 # Does College Pay Off? AI-Powered ROI Analytics on Databricks
 
+🔗 **Live dashboard: [https://college-roi-analytics-wdsk3fzehd7jx4ncmyr3sr.streamlit.app/](https://college-roi-analytics-wdsk3fzehd7jx4ncmyr3sr.streamlit.app/)** (synthetic data, first load can take ~30 seconds while the warehouse wakes up)
+
 **What it is:** a cloud data pipeline and public dashboard that analyses 30,000 graduates' costs, debt and 10-year earnings. AI is used to *build* it (Claude Code) and *inside* it (AI-written insights and major "report cards").
 
 **Business question:** Which majors and college types actually pay off over 10 years, and how much do internships, finishing on time and debt change the answer?
-
-🔗 **Live dashboard:** _coming soon_
 
 ## How it works
 ```
@@ -66,7 +66,7 @@ Column definitions: [data_dictionary.csv](data_dictionary.csv)
 - [x] Phase 3: Intermediate models
 - [x] Phase 4: Marts (star schema + summary tables)
 - [x] Phase 5: AI report cards + insights
-- [ ] Phase 6: Public Streamlit dashboard
+- [x] Phase 6: Public Streamlit dashboard
 - [ ] Phase 7: Schedule with Databricks Jobs, write-up + LinkedIn post
 
 Getting started: [SETUP_GUIDE.md](SETUP_GUIDE.md)
