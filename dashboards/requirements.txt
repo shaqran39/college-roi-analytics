@@ -1,0 +1,5 @@
+streamlit>=1.65
+databricks-sql-connector>=3.0
+pandas
+pyarrow
+plotly

@@ -42,13 +42,13 @@ major_facts as (
             'Top 3 majors by median 10-year net return: ',
             array_join(array_sort(collect_list(case when best_rank <= 3 then concat(
                 lpad(cast(best_rank as string), 2, '0'), '. ', replace(major, '_', ' '),
-                case when median_net_roi_usd < 0 then concat(' lost US$', format_number(-median_net_roi_usd, 0)) else concat(' US$', format_number(median_net_roi_usd, 0)) end,
+                case when median_net_roi_usd < 0 then concat(': typical graduate was US$', format_number(-median_net_roi_usd, 0), ' worse off') else concat(': typical graduate came out US$', format_number(median_net_roi_usd, 0), ' ahead') end,
                 ' (', cast(pct_roi_negative as string), '% worse off than not going to college)'
             ) end)), '; '),
             '\nBottom 3 majors by median 10-year net return: ',
             array_join(array_sort(collect_list(case when worst_rank <= 3 then concat(
                 lpad(cast(worst_rank as string), 2, '0'), '. ', replace(major, '_', ' '),
-                case when median_net_roi_usd < 0 then concat(' lost US$', format_number(-median_net_roi_usd, 0)) else concat(' US$', format_number(median_net_roi_usd, 0)) end,
+                case when median_net_roi_usd < 0 then concat(': typical graduate was US$', format_number(-median_net_roi_usd, 0), ' worse off') else concat(': typical graduate came out US$', format_number(median_net_roi_usd, 0), ' ahead') end,
                 ' (', cast(pct_roi_negative as string), '% worse off than not going to college)'
             ) end)), '; ')
         ) as facts
@@ -63,7 +63,7 @@ tier_facts as (
             'By institution tier: ',
             array_join(array_sort(collect_list(concat(
                 replace(institution_tier, '_', ' '), ': typical graduate',
-                case when median_net_roi_usd < 0 then concat(' lost US$', format_number(-median_net_roi_usd, 0))
+                case when median_net_roi_usd < 0 then concat(' was US$', format_number(-median_net_roi_usd, 0), ' worse off')
                      else concat(' came out US$', format_number(median_net_roi_usd, 0), ' ahead') end,
                 ', ', cast(pct_roi_negative as string), '% of graduates worse off than not going to college',
                 ', median debt US$', format_number(median_debt_usd, 0)
@@ -80,8 +80,8 @@ choice_facts as (
             'Choices, all graduates (median net return with vs without, and the difference): ',
             array_join(array_sort(collect_list(concat(
                 replace(choice, '_', ' '),
-                case when yes_roi < 0 then concat(' lost US$', format_number(-yes_roi, 0)) else concat(' US$', format_number(yes_roi, 0)) end,
-                ' vs', case when no_roi < 0 then concat(' lost US$', format_number(-no_roi, 0)) else concat(' US$', format_number(no_roi, 0)) end,
+                case when yes_roi < 0 then concat(' US$', format_number(-yes_roi, 0), ' worse off') else concat(' US$', format_number(yes_roi, 0)) end,
+                ' vs', case when no_roi < 0 then concat(' US$', format_number(-no_roi, 0), ' worse off') else concat(' US$', format_number(no_roi, 0)) end,
                 ', difference US$', format_number(yes_roi - no_roi, 0)
             ))), '; ')
         ) as facts
@@ -131,6 +131,7 @@ key_findings as (
                 'Say that the internship and on-time differences compare groups and do not prove cause. ',
                 'These are past results from this data, not predictions: write in the past tense and never use the word will. ',
                 'Medians describe the typical graduate: never say most or the majority for a median. ',
+                'Describe money outcomes only as came out ahead or worse off. Never use the words loss, losses, lost, gain or gains. ',
                 'Use Australian English spelling (for example analyse, favourable, labour). ',
                 'Money is in US dollars, so write amounts as US$. ',
                 'Reply with plain text only: no heading, no bullet points, no quote marks.\n\n',

@@ -27,6 +27,7 @@ logs/
 *.json.key
 *.pem
 .databrickscfg
+**/.streamlit/secrets.toml
 
 # Claude Code personal settings
 .claude/settings.local.json
