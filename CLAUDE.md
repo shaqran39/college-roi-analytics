@@ -19,7 +19,7 @@ Shaqran is learning AI-assisted data engineering. When you make changes:
 - **We only build on prod now.** Always use `--target prod`. Skip local DuckDB builds (`warehouse/college.duckdb`, target `dev`); they're kept only as an old practice setup
 - Ingestion (cloud): CSVs uploaded to the volume `/Volumes/workspace/raw/landing`, tables created by `ingestion/databricks_load_raw.sql`
 - Transformation: dbt Core in `dbt/` (run all dbt commands from inside the `dbt/` folder)
-- AI in pipeline: Databricks `ai_query` (per-major report cards, findings summary). Only run these on the `prod` target, and guard them with `{% if target.name == 'prod' %}`
+- AI in pipeline: Databricks `ai_query` (per-major report cards, findings summary). Only run these on Databricks, and guard them with `{{ config(enabled = target.type == 'databricks') }}` (not `target.name`: the scheduled Databricks Job's dbt task uses its own target name)
 - Dashboard: Streamlit app in `dashboards/`, deployed to Streamlit Community Cloud (public)
 - OS: Windows. Use PowerShell-friendly commands. The venv lives in `.venv`.
 - Databricks credentials come from env vars DATABRICKS_HOST, DATABRICKS_HTTP_PATH, DATABRICKS_TOKEN

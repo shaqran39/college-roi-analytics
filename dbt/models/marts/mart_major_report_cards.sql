@@ -1,8 +1,8 @@
 -- One row per major. A rule-based takeaway plus 2 AI-written sentences on whether the major pays off,
 -- built only from that major's numbers in mart_roi_by_major.
--- Prod only: ai_query exists on Databricks, not DuckDB.
+-- Databricks only (any target, including the scheduled job): ai_query doesn't exist on DuckDB.
 
-{{ config(enabled = target.name == 'prod') }}
+{{ config(enabled = target.type == 'databricks') }}
 
 with roi_by_major as (
 

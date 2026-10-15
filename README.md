@@ -33,14 +33,14 @@ Scheduled with Databricks Jobs. Built with Claude Code as AI pair-engineer.
 |---|---|---|
 | AI as builder | Writes, runs, tests and fixes the SQL/Python | Claude Code |
 | AI in the pipeline | Writes a short verdict per major ("high cost, but pays back fast if you intern") | Databricks `ai_query` |
-| AI in the product | Summarises the key findings, plus an ask-a-question box on the dashboard | Databricks `ai_query` |
+| AI in the product | Summarises the key findings, shown on the dashboard | Databricks `ai_query` |
 
 ### How the AI text is kept honest
 - Model: `databricks-meta-llama-3-3-70b-instruct`, set once in `dbt_project.yml` (`ai_model_endpoint`)
 - The prompt only gets numbers from the marts and is told not to add any others. It writes in the past tense ("in this data…"), in Australian English
 - Each report card's opening takeaway ("A strong financial bet." … "Financially risky.") comes from fixed SQL rules, not the AI, so it's consistent and checkable
 - `mart_key_findings.input_facts` stores the exact fact sheet the AI was given, so every number in the summary can be checked
-- AI models run only on the `prod` target (DuckDB has no `ai_query`)
+- AI models run only on Databricks (DuckDB has no `ai_query`)
 
 Column definitions: [data_dictionary.csv](data_dictionary.csv)
 
