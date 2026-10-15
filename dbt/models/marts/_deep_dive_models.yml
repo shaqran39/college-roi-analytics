@@ -1,0 +1,157 @@
+version: 2
+
+models:
+  - name: mart_roi_by_band
+    description: >
+      One row per GPA band and per debt band. Median net ROI with the middle half of outcomes
+      (25th to 75th percentile), so the dashboard can show how ROI moves with GPA or debt.
+      Compares groups, doesn't prove cause. Feeds the dashboard's Deep dive page.
+    columns:
+      - name: band_id
+        description: dimension + band_order, e.g. 'gpa-3'. Primary key
+        data_tests:
+          - unique
+          - not_null
+      - name: dimension
+        description: What the bands split by
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['gpa', 'debt']
+      - name: band_order
+        description: Sort order of the band within its dimension (1 = lowest GPA / no debt)
+        data_tests:
+          - not_null
+      - name: band_label
+        description: Readable band name for chart axes, e.g. '3.00–3.24' or 'US$25K–50K'
+        data_tests:
+          - not_null
+      - name: grad_count
+        description: Number of graduates in the band
+        data_tests:
+          - not_null
+      - name: p25_net_roi_usd
+        description: 25th percentile 10-year net ROI, USD
+        data_tests:
+          - not_null
+      - name: median_net_roi_usd
+        description: Median 10-year net ROI (extra earnings vs high school, minus net cost), USD
+        data_tests:
+          - not_null
+      - name: p75_net_roi_usd
+        description: 75th percentile 10-year net ROI, USD
+        data_tests:
+          - not_null
+      - name: pct_roi_negative
+        description: "% of grads in the band with net ROI <= 0 (worse off than skipping college)"
+        data_tests:
+          - not_null
+
+  - name: mart_outcome_spread_by_major
+    description: >
+      One row per major. How spread out outcomes are: worst case (10th percentile), typical (median)
+      and best case (90th percentile) 10-year net ROI, plus the 25th and 75th percentiles.
+      Feeds the dashboard's Deep dive page.
+    columns:
+      - name: major
+        description: Major name. Primary key
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('mart_roi_by_major')
+                field: major
+      - name: grad_count
+        description: Number of graduates with this major
+        data_tests:
+          - not_null
+      - name: p10_net_roi_usd
+        description: "Worst case: 10th percentile net ROI (1 in 10 grads did this badly or worse), USD"
+        data_tests:
+          - not_null
+      - name: p25_net_roi_usd
+        description: 25th percentile net ROI, USD
+        data_tests:
+          - not_null
+      - name: median_net_roi_usd
+        description: "Typical: median net ROI, USD"
+        data_tests:
+          - not_null
+      - name: p75_net_roi_usd
+        description: 75th percentile net ROI, USD
+        data_tests:
+          - not_null
+      - name: p90_net_roi_usd
+        description: "Best case: 90th percentile net ROI (1 in 10 grads did this well or better), USD"
+        data_tests:
+          - not_null
+
+  - name: mart_what_if
+    description: >
+      One row per major x institution tier x internship x on-time completion, with the typical
+      outcome for graduates in that group. Powers the dashboard's "What if" tool. Some groups are
+      small: the dashboard warns when grad_count is low. Compares groups, doesn't prove cause.
+    columns:
+      - name: what_if_id
+        description: major-tier-intern/no_intern-on_time/late. Primary key
+        data_tests:
+          - unique
+          - not_null
+      - name: major
+        description: Major name
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('mart_roi_by_major')
+                field: major
+      - name: institution_tier
+        description: Institution tier
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('mart_roi_by_tier')
+                field: institution_tier
+      - name: has_internship
+        description: Did the graduates in this group do an internship
+        data_tests:
+          - not_null
+      - name: is_completed_on_time
+        description: Did the graduates in this group finish on time
+        data_tests:
+          - not_null
+      - name: grad_count
+        description: Number of graduates in this group
+        data_tests:
+          - not_null
+      - name: p25_net_roi_usd
+        description: 25th percentile 10-year net ROI, USD
+        data_tests:
+          - not_null
+      - name: median_net_roi_usd
+        description: Median 10-year net ROI, USD
+        data_tests:
+          - not_null
+      - name: p75_net_roi_usd
+        description: 75th percentile 10-year net ROI, USD
+        data_tests:
+          - not_null
+      - name: pct_roi_negative
+        description: "% of grads in the group with net ROI <= 0"
+        data_tests:
+          - not_null
+      - name: median_payback_years
+        description: Median years needed to earn back the net cost
+        data_tests:
+          - not_null
+      - name: median_net_cost_usd
+        description: Median net cost of college, USD
+        data_tests:
+          - not_null
+      - name: median_debt_usd
+        description: Median debt at graduation, USD
+        data_tests:
+          - not_null

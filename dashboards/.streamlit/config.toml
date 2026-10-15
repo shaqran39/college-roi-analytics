@@ -1,0 +1,6 @@
+[theme]
+# one calm accent; Streamlit's own light/dark switch still works
+primaryColor = "#2a78d6"
+
+[client]
+toolbarMode = "minimal"

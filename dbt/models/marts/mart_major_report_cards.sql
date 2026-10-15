@@ -79,8 +79,9 @@ prompts as (
                                 ' years or more to earn back the net cost, longer than the 10 years in the data.')
                 end, '\n',
             'Share who had not earned back the net cost within 10 years: ', cast(pct_not_paid_back_10yr as string), '%\n',
-            'Median debt as a share of yearly earnings: ', cast(median_debt_to_earnings_ratio as string),
-                ' (1.0 = debt equals one year of pay)'
+            -- a full sentence, so the AI can't turn the ratio into an awkward phrase
+            'The typical graduate owed debt equal to ',
+                cast(cast(round(median_debt_to_earnings_ratio * 100) as int) as string), '% of a year of their pay.'
         ) as prompt
     from with_takeaway
 
