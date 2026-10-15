@@ -28,6 +28,9 @@ Public Streamlit dashboard   (charts + AI insights, anyone can open it)
 Scheduled with Databricks Jobs. Built with Claude Code as AI pair-engineer.
 ```
 
+### Refreshing the data
+To refresh the data, upload a new CSV with a new name, e.g. `college_major_roi_2026-11.csv`, to `/Volumes/workspace/raw/landing/`. The job only starts for new file names (re-uploading the same name won't trigger it). It loads the newest CSV in the folder, then rebuilds and tests everything.
+
 ## Where the AI is
 | | What | Tool |
 |---|---|---|
