@@ -1,9 +1,9 @@
 -- One row. An AI-written summary paragraph of the whole project, built from a short
 -- fact sheet of the marts. input_facts keeps the exact facts sent, so the paragraph
 -- can be checked for made-up numbers.
--- Prod only: ai_query exists on Databricks, not DuckDB.
+-- Databricks only (any target, including the scheduled job): ai_query doesn't exist on DuckDB.
 
-{{ config(enabled = target.name == 'prod') }}
+{{ config(enabled = target.type == 'databricks') }}
 
 with roi_by_major as (
 
