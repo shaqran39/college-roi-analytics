@@ -16,7 +16,7 @@ Shaqran is learning AI-assisted data engineering. When you make changes:
 
 ## Stack
 - **Production: Databricks Free Edition.** Catalog `workspace`, raw table `workspace.raw.college_major_roi`, dbt builds into `workspace.staging`, `workspace.intermediate` and `workspace.marts`
-- Local practice: DuckDB at `warehouse/college.duckdb` (dbt target `dev`, loaded by `ingestion/load_raw.py`)
+- **We only build on prod now.** Always use `--target prod`. Skip local DuckDB builds (`warehouse/college.duckdb`, target `dev`); they're kept only as an old practice setup
 - Ingestion (cloud): CSVs uploaded to the volume `/Volumes/workspace/raw/landing`, tables created by `ingestion/databricks_load_raw.sql`
 - Transformation: dbt Core in `dbt/` (run all dbt commands from inside the `dbt/` folder)
 - AI in pipeline: Databricks `ai_query` (per-major report cards, findings summary). Only run these on the `prod` target, and guard them with `{% if target.name == 'prod' %}`
@@ -30,7 +30,6 @@ cd dbt
 dbt debug --target prod                 # check Databricks connection
 dbt build --target prod                 # run models + tests in Databricks
 dbt build --target prod --select stg_graduates+   # one model and everything after it
-dbt build                               # same thing on local DuckDB (practice)
 dbt docs generate; dbt docs serve
 ```
 
@@ -52,7 +51,7 @@ dbt docs generate; dbt docs serve
 - Every primary key gets `unique` + `not_null` tests. Foreign keys get `relationships` tests
 - Always reference other models with `ref()` and raw tables with `source()`, never hard-coded table names
 - Use CTEs: import CTEs at the top, then logic, then a final `select`
-- After changing a model, run `dbt build --select <model>+` and fix failures before saying you're done
+- After changing a model, run `dbt build --target prod --select <model>+` and fix failures before saying you're done
 
 ## Do not
 - Commit anything in `data/raw/` or `warehouse/` (they're gitignored, the data is too big)

@@ -54,16 +54,18 @@ prompts as (
             'These are past results from this data, not predictions: write in the past tense. Never use the word will. ',
             'Never say most or the majority. Leave out any share that is 0.0%. ',
             'Do not explain how the return is calculated. ',
+            'Describe money outcomes only as came out ahead or worse off. Never use the words loss, losses, lost, gain or gains. ',
             'Write 2 natural, flowing sentences of about 45 words in total, using the 4 or 5 most telling numbers. ',
             'Use Australian English spelling (for example analyse, favourable, labour). ',
             'Money is in US dollars, so write amounts as US$. ',
             'Where a line below is a full sentence, keep its meaning exactly. ',
             'Reply with plain text only: no heading, no bullet points, no quote marks.\n\n',
             'Major: ', replace(major, '_', ' '), '\n',
-            'Graduates in the data: ', cast(grad_count as string), '\n',
             'After 10 years, counting extra earnings vs high school minus net cost, the typical graduate ',
                 case
-                    when median_net_roi_usd < 0 then concat('lost US$', format_number(-median_net_roi_usd, 0))
+                    when median_net_roi_usd < 0 then concat('was US$', format_number(-median_net_roi_usd, 0), ' worse off')
+                    -- near zero: say "about broke even" so the AI doesn't mix up ahead and worse off
+                    when median_net_roi_usd < 10000 then concat('came out only US$', format_number(median_net_roi_usd, 0), ' ahead, about breaking even')
                     else concat('came out US$', format_number(median_net_roi_usd, 0), ' ahead')
                 end, '.\n',
             'Share of graduates worse off than not going to college: ', cast(pct_roi_negative as string), '%\n',
