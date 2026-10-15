@@ -28,8 +28,17 @@ Public Streamlit dashboard   (charts + AI insights, anyone can open it)
 Scheduled with Databricks Jobs. Built with Claude Code as AI pair-engineer.
 ```
 
-### Refreshing the data
-To refresh the data, upload a new CSV with a new name, e.g. `college_major_roi_2026-11.csv`, to `/Volumes/workspace/raw/landing/`. The job only starts for new file names (re-uploading the same name won't trigger it). It loads the newest CSV in the folder, then rebuilds and tests everything.
+## How the automation works
+A Databricks Job, `college_roi_refresh` ([definition](orchestration/college_roi_refresh_job.yml)), keeps everything up to date with no manual steps:
+
+1. **Trigger:** a new CSV lands in `/Volumes/workspace/raw/landing/`. The job waits 60 seconds after the last change, so a slow upload finishes first.
+2. **`load_raw`:** runs [`ingestion/databricks_load_raw.sql`](ingestion/databricks_load_raw.sql). It loads the **newest** CSV in the folder into `workspace.raw.college_major_roi` and records which file in `_source_file`. If the load comes out empty, it stops with an error.
+3. **`dbt_build`:** runs only if step 2 succeeded. Runs `dbt build` on all models and tests, including the AI report cards and key findings.
+4. **Fail loudly:** any error or failed test stops the job and sends an email. Only one run at a time.
+
+Both tasks run the code on `main` straight from GitHub, so a merged PR is live on the next run. The dashboard picks up new numbers within 6 hours (its cache time).
+
+**To refresh the data, upload a new CSV with a new name**, e.g. `college_major_roi_2026-11.csv`. The trigger only fires for new file names, not re-uploads of the same name.
 
 ## Where the AI is
 | | What | Tool |
@@ -70,6 +79,7 @@ Column definitions: [data_dictionary.csv](data_dictionary.csv)
 - [x] Phase 4: Marts (star schema + summary tables)
 - [x] Phase 5: AI report cards + insights
 - [x] Phase 6: Public Streamlit dashboard
-- [ ] Phase 7: Schedule with Databricks Jobs, write-up + LinkedIn post
+- [x] Phase 7a: Automate with a Databricks Job (file arrival trigger → load → dbt build)
+- [ ] Phase 7b: Write-up + LinkedIn post
 
 Getting started: [SETUP_GUIDE.md](SETUP_GUIDE.md)

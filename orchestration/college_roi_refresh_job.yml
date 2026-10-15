@@ -1,0 +1,74 @@
+# Databricks Job: college_roi_refresh
+# Exported from the Databricks UI job definition (Declarative Automation Bundle format).
+# When a new CSV lands in /Volumes/workspace/raw/landing/, it reloads the raw table
+# from the newest CSV, then runs dbt build (models + tests, including the AI marts).
+# Any failure stops the job and sends an email.
+#
+# No secrets in here. Fill in the two variables for your own workspace:
+#   warehouse_id: SQL Warehouses -> your warehouse -> Overview -> ID
+#   alert_email:  where failure (and success) emails go
+
+variables:
+  warehouse_id:
+    description: ID of the serverless SQL warehouse both tasks run on
+  alert_email:
+    description: Email address for job notifications
+
+resources:
+  jobs:
+    college_roi_refresh:
+      name: college_roi_refresh
+      max_concurrent_runs: 1        # two uploads can't run two builds at once
+      queue:
+        enabled: true
+
+      # Run when a new file arrives (new file names only; re-uploading the same name won't trigger)
+      trigger:
+        pause_status: UNPAUSED
+        file_arrival:
+          url: /Volumes/workspace/raw/landing/
+          min_time_between_triggers_seconds: 60
+          wait_after_last_change_seconds: 60    # let a slow upload finish first
+
+      email_notifications:
+        on_failure:
+          - ${var.alert_email}
+        on_success:
+          - ${var.alert_email}
+
+      # Both tasks run the code on main in GitHub
+      git_source:
+        git_url: https://github.com/shaqran39/college-roi-analytics
+        git_provider: gitHub
+        git_branch: main
+
+      tasks:
+        # Task 1: newest CSV in the landing volume -> workspace.raw.college_major_roi
+        - task_key: load_raw
+          sql_task:
+            file:
+              path: ingestion/databricks_load_raw.sql
+              source: GIT
+            warehouse_id: ${var.warehouse_id}
+
+        # Task 2: dbt build (only runs if load_raw succeeded; any failed test fails the job)
+        - task_key: dbt_build
+          depends_on:
+            - task_key: load_raw
+          dbt_task:
+            project_directory: dbt
+            commands:
+              - dbt build             # no --target: Databricks writes its own profile for this task
+            catalog: workspace
+            schema: default
+            source: GIT
+            warehouse_id: ${var.warehouse_id}
+          environment_key: dbt-default
+          max_retries: 0
+
+      environments:
+        - environment_key: dbt-default
+          spec:
+            environment_version: "6"
+            dependencies:
+              - dbt-databricks>=1.0.0,<2.0.0
