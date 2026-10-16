@@ -10,8 +10,9 @@ from databricks import sql
 
 MARTS_SCHEMA = "workspace.marts"
 
-# results are kept for 6 hours, so clicking around the dashboard doesn't wake the warehouse
-CACHE_SECONDS = 6 * 60 * 60
+# results are kept for 1 hour, so clicking around the dashboard doesn't wake the warehouse,
+# but new data from the Databricks Job shows up within the hour (or straight away with "Refresh data")
+CACHE_SECONDS = 60 * 60
 
 
 def _credentials() -> dict:
@@ -43,6 +44,17 @@ def run_query(query: str) -> pd.DataFrame:
     ) as connection, connection.cursor() as cursor:
         cursor.execute(query)
         return cursor.fetchall_arrow().to_pandas()
+
+
+def refresh_button() -> None:
+    """Sidebar button that forgets the cached results and reloads the page with fresh data."""
+    if st.sidebar.button(
+        "Refresh data",
+        icon=":material/refresh:",
+        help="Fetch the latest numbers from Databricks (otherwise they update every hour).",
+    ):
+        run_query.clear()
+        st.rerun()
 
 
 def load_mart(table_name: str) -> pd.DataFrame:

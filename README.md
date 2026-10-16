@@ -38,7 +38,15 @@ A Databricks Job, `college_roi_refresh` ([definition](orchestration/college_roi_
 
 Both tasks run the code on `main` straight from GitHub, so a merged PR is live on the next run. The dashboard picks up new numbers within 6 hours (its cache time).
 
-**To refresh the data, upload a new CSV with a new name**, e.g. `college_major_roi_2026-11.csv`. The trigger only fires for new file names, not re-uploads of the same name.
+**To refresh the data, upload a new CSV with a new name**, e.g. `college_major_roi_2026-11.csv`. The trigger only fires for new file names, not re-uploads of the same name. The dashboard shows the new numbers within an hour, or straight away with its **Refresh data** button.
+
+**The CSV must have the same 18 columns as `college_major_roi.csv`** (names and meaning, see [data_dictionary.csv](data_dictionary.csv)). More or fewer rows are fine. If the columns change:
+1. **The load still works.** `load_raw` copies whatever columns the file has into the raw table.
+2. **dbt fails.** A missing or renamed column breaks `stg_graduates`; bad values fail its tests. Everything after it is skipped.
+3. **The job emails a failure.**
+4. **The dashboard keeps the last good data.** The marts are only rebuilt when everything before them passes. (A failed test on a mart itself is the exception: that one table has already been rebuilt.)
+
+Extra columns are ignored, because staging only picks the columns it knows.
 
 ## Where the AI is
 | | What | Tool |
