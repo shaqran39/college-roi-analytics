@@ -67,7 +67,7 @@ create volume if not exists workspace.raw.landing;
 ## B4. Create the raw table
 1. Back in the **SQL Editor**, open `ingestion\databricks_load_raw.sql` from the project folder in Notepad or VS Code
 2. Copy all of it, paste it in and click **Run all**
-3. The last result should show **30000** rows
+3. It should finish with no error (the last statement stops with an error if the table is empty). Check with `select count(*) from workspace.raw.college_major_roi`: it should show **30000**
 
 ✅ Your data is now in the cloud.
 
