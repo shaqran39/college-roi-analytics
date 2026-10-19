@@ -33,8 +33,12 @@ def _credentials() -> dict:
     ttl=CACHE_SECONDS,
     show_spinner="Loading from Databricks. The first load can take up to 30 seconds while the warehouse wakes up...",
 )
-def run_query(query: str) -> pd.DataFrame:
-    """Run a SQL query and return the result as a DataFrame. Same query = cached result."""
+def run_query(query: str, params: dict | None = None) -> pd.DataFrame:
+    """Run a SQL query and return the result as a DataFrame. Same query (and params) = cached result.
+
+    Values that change, like a picked upload, go in params as named markers (`where id = :id`),
+    never into the query text.
+    """
     creds = _credentials()
     # a fresh connection per (rare, cached) query, so an idle warehouse can't leave us a dead connection
     with sql.connect(
@@ -42,7 +46,7 @@ def run_query(query: str) -> pd.DataFrame:
         http_path=creds["http_path"],
         access_token=creds["token"],
     ) as connection, connection.cursor() as cursor:
-        cursor.execute(query)
+        cursor.execute(query, parameters=params)
         return cursor.fetchall_arrow().to_pandas()
 
 
