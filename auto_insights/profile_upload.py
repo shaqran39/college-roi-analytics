@@ -6,6 +6,7 @@ or from a laptop for testing:
 
     python auto_insights/profile_upload.py               # profile the newest CSV
     python auto_insights/profile_upload.py --setup-only  # just create the schema, volume and tables
+    python auto_insights/profile_upload.py --cleanup-dry-run  # show what the clean-up WOULD delete, delete nothing
 
 All work is SQL sent through run_sql(). In the Job it uses spark.sql; on a laptop it uses
 databricks-sql-connector with the env vars DATABRICKS_HOST, DATABRICKS_HTTP_PATH, DATABRICKS_TOKEN.
@@ -14,16 +15,24 @@ Column names can't be parameters, so they are cleaned to snake_case and backtick
 
 Separate from the college ROI pipeline: it only touches workspace.raw.auto_landing
 and the workspace.auto_insights schema.
+
+After each successful run it cleans up (see cleanup()): old CSVs in auto_landing and old
+uploads' rows in workspace.auto_insights. This is the ONLY code in the project allowed to delete.
 """
 
 import argparse
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 LANDING_PATH = "/Volumes/workspace/raw/auto_landing/"
 SCHEMA = "workspace.auto_insights"
 AI_MODEL = "databricks-meta-llama-3-3-70b-instruct"
+
+# clean-up after each successful run (retention)
+KEEP_FILES_DAYS = 7         # CSVs in auto_landing older than this are deleted (the newest CSV is always kept)
+KEEP_RESULTS_DAYS = 30      # rows in workspace.auto_insights for uploads older than this are deleted...
+KEEP_NEWEST_UPLOADS = 3     # ...except the 3 newest uploads, which are always kept
 
 MAX_COLUMNS = 50            # profile at most the first 50 columns
 MAX_ROWS = 1_000_000        # bigger files are profiled on a random sample of this many rows
@@ -169,8 +178,15 @@ def setup() -> None:
 
 # ---------- load ----------
 
-def newest_csv() -> tuple[str, str]:
-    """(file_path, file_name) of the most recently modified *.csv in the landing volume."""
+def as_utc(modified) -> datetime:
+    """LIST gives milliseconds since 1970, read_files gives a timestamp; both become a UTC datetime."""
+    if isinstance(modified, datetime):
+        return modified if modified.tzinfo else modified.replace(tzinfo=timezone.utc)
+    return datetime.fromtimestamp(int(modified) / 1000, tz=timezone.utc)
+
+
+def list_csvs() -> list[tuple[str, str, datetime]]:
+    """(file_path, file_name, modified_at) of every *.csv in the landing volume, newest first."""
     try:
         listing = [
             (row["path"], row["name"], row["modification_time"])
@@ -185,11 +201,21 @@ def newest_csv() -> tuple[str, str]:
                 "format => 'binaryFile', pathGlobFilter => '*.csv')"
             )
         ]
-    csvs = [item for item in listing if item[1].lower().endswith(".csv")]
+    csvs = [
+        (path.removeprefix("dbfs:"), name, as_utc(modified))
+        for path, name, modified in listing
+        if name.lower().endswith(".csv")
+    ]
+    return sorted(csvs, key=lambda item: item[2], reverse=True)
+
+
+def newest_csv() -> tuple[str, str]:
+    """(file_path, file_name) of the most recently modified *.csv in the landing volume."""
+    csvs = list_csvs()
     if not csvs:
         raise RuntimeError(f"No CSV files found in {LANDING_PATH}. Upload one first.")
-    path, name, _ = max(csvs, key=lambda item: item[2])
-    return path.removeprefix("dbfs:"), name
+    path, name, _ = csvs[0]
+    return path, name
 
 
 def clean_names(names: list[str]) -> list[str]:
@@ -469,12 +495,85 @@ def write_ai_report(upload_id: str, facts: str) -> str:
     return run_sql(f"select report_text from {SCHEMA}.ai_report where upload_id = :upload_id", {"upload_id": upload_id})[0]["report_text"]
 
 
+# ---------- clean-up (retention) ----------
+
+def delete_file(path: str) -> None:
+    """Delete one file, but only inside the auto_landing volume."""
+    if not path.startswith(LANDING_PATH):
+        raise ValueError(f"Refusing to delete {path}: it's outside {LANDING_PATH}")
+    if os.environ.get("DATABRICKS_RUNTIME_VERSION"):
+        os.remove(path)  # in the Job, volumes can be used like a normal folder: no extra library needed
+    else:
+        from databricks.sdk import WorkspaceClient
+
+        WorkspaceClient(
+            host="https://" + os.environ["DATABRICKS_HOST"].removeprefix("https://").rstrip("/"),
+            token=os.environ["DATABRICKS_TOKEN"],
+        ).files.delete(path)
+
+
+def cleanup(dry_run: bool = False) -> None:
+    """Delete old CSVs and old uploads' results. With dry_run=True, only print what WOULD be deleted.
+
+    - CSVs in auto_landing older than KEEP_FILES_DAYS, but never the newest CSV.
+    - Rows in every workspace.auto_insights table (the ones with an upload_id) for uploads older than
+      KEEP_RESULTS_DAYS, but never the KEEP_NEWEST_UPLOADS newest uploads.
+    latest_upload and profile_sample hold no upload_id (they're replaced every run), so they're left alone.
+    """
+    verb = "Would delete" if dry_run else "Deleted"
+    now = datetime.now(timezone.utc)
+    print("\nClean-up" + (" (DRY RUN: nothing is deleted)" if dry_run else ""))
+
+    # 1. old CSV files (list_csvs is newest first, so [1:] always skips the newest)
+    file_cutoff = now - timedelta(days=KEEP_FILES_DAYS)
+    old_files = [f for f in list_csvs()[1:] if f[2] < file_cutoff]
+    for path, name, modified in old_files:
+        if not dry_run:
+            delete_file(path)
+        print(f"  {verb} file {name} (last changed {modified:%Y-%m-%d %H:%M} UTC)")
+    if not old_files:
+        print(f"  No CSV files older than {KEEP_FILES_DAYS} days to delete.")
+
+    # 2. old results. upload_id starts with the run time (20260920_101500_<file name>), so it sorts by age,
+    # and also catches leftover rows from a run that failed before it wrote its uploads row
+    keep = [row["upload_id"] for row in run_sql(
+        f"select upload_id from {SCHEMA}.uploads order by loaded_at desc limit {KEEP_NEWEST_UPLOADS}"
+    )]
+    params = {"cutoff": f"{now - timedelta(days=KEEP_RESULTS_DAYS):%Y%m%d_%H%M%S}"}
+    params.update({f"keep_{i}": upload_id for i, upload_id in enumerate(keep)})
+    where = "upload_id rlike '^[0-9]{8}_[0-9]{6}_' and left(upload_id, 15) < :cutoff"
+    if keep:
+        where += " and upload_id not in (" + ", ".join(f":keep_{i}" for i in range(len(keep))) + ")"
+
+    # uploads first, so the dashboard stops listing an upload before its details go
+    total = 0
+    for table in ["uploads"] + [t for t in TABLES if t != "uploads"]:
+        found = run_sql(
+            f"select count(*) as n, count(distinct upload_id) as uploads, "
+            f"array_join(array_sort(collect_set(upload_id)), ', ') as ids from {SCHEMA}.{table} where {where}",
+            params,
+        )[0]
+        if not found["n"]:
+            continue
+        if not dry_run:
+            run_sql(f"delete from {SCHEMA}.{table} where {where}", params)
+        total += found["n"]
+        print(f"  {verb} {found['n']:,} rows from {table} ({found['uploads']} uploads: {found['ids']})")
+    if not total:
+        print(f"  No uploads older than {KEEP_RESULTS_DAYS} days to delete (the {KEEP_NEWEST_UPLOADS} newest are always kept).")
+
+
 # ---------- main ----------
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--setup-only", action="store_true", help="only create the volume, schema and tables")
+    parser.add_argument("--cleanup-dry-run", action="store_true", help="only show what the clean-up would delete")
     args = parser.parse_args()
+
+    if args.cleanup_dry_run:
+        cleanup(dry_run=True)
+        return
 
     setup()
     if args.setup_only:
@@ -536,6 +635,12 @@ def main() -> None:
     # written last: the dashboard only lists uploads that finished every step
     insert_rows("uploads", [upload])
     print(f"Done: {upload_id}\n\n{report}")
+
+    # the profile is saved, so a clean-up problem must not fail the run: warn and carry on
+    try:
+        cleanup()
+    except Exception as error:
+        print(f"WARNING: clean-up failed (the profile above was saved fine): {error}")
 
 
 if __name__ == "__main__":
