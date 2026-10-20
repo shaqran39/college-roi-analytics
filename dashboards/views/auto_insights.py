@@ -4,6 +4,7 @@ Reads only the workspace.auto_insights tables written by auto_insights/profile_u
 The picked upload goes into every query as a parameter; there's no free text and no upload button.
 """
 
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -94,26 +95,33 @@ if upload["is_sampled"]:
 
 # data quality
 st.subheader("Data quality")
-# formatted with a Styler so missing values show as empty cells, not "None" (sorting still uses the real values)
+# min/median/max and the dates are often empty (they only apply to some column types). st.dataframe ignores
+# a Styler's na_rep and shows "None", so those columns become display text here, with "" for missing.
+# % missing and distinct values are never empty, so they stay numbers (and sort as numbers).
+def as_text(values, formatter=str):
+    return values.map(lambda v: "" if pd.isna(v) else formatter(v))
+
+
 st.dataframe(
     profile.assign(
         column=profile["column_name"],
         kind=profile["column_type"].map(TYPE_LABELS),
-    )[["column", "kind", "null_pct", "distinct_count", "min_value", "median_value", "max_value", "min_date", "max_date"]]
-    .style.format(
-        {"null_pct": "{:.1f}%", "distinct_count": "{:,}", "min_value": number, "median_value": number, "max_value": number},
-        na_rep="",
-    ),
+        min_value=as_text(profile["min_value"], number),
+        median_value=as_text(profile["median_value"], number),
+        max_value=as_text(profile["max_value"], number),
+        min_date=as_text(profile["min_date"]),
+        max_date=as_text(profile["max_date"]),
+    )[["column", "kind", "null_pct", "distinct_count", "min_value", "median_value", "max_value", "min_date", "max_date"]],
     hide_index=True,
     width="stretch",
     column_config={
         "column": "Column",
         "kind": st.column_config.TextColumn("Type", help="ID / free text = nearly every value is unique, so it's left out of the charts and the AI report."),
-        "null_pct": "% missing",
-        "distinct_count": "Distinct values",
-        "min_value": "Min",
-        "median_value": "Median",
-        "max_value": "Max",
+        "null_pct": st.column_config.NumberColumn("% missing", format="%.1f%%"),
+        "distinct_count": st.column_config.NumberColumn("Distinct values", format="localized"),
+        "min_value": st.column_config.TextColumn("Min", alignment="right"),
+        "median_value": st.column_config.TextColumn("Median", alignment="right"),
+        "max_value": st.column_config.TextColumn("Max", alignment="right"),
         "min_date": "First date",
         "max_date": "Last date",
     },
