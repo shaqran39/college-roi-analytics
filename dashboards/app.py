@@ -17,6 +17,7 @@ page = st.navigation([
     st.Page("views/majors.py", title="Majors", icon=":material/school:"),
     st.Page("views/colleges_and_choices.py", title="Colleges & choices", icon=":material/account_balance:"),
     st.Page("views/deep_dive.py", title="Deep dive", icon=":material/query_stats:"),
+    st.Page("views/auto_insights.py", title="Auto insights", icon=":material/auto_awesome:"),
 ])
 
 refresh_button()

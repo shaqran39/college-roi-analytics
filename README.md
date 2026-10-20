@@ -31,7 +31,8 @@ MARTS          star schema + summary tables
    ├── AI: plain-English "report card" per major      mart_major_report_cards  (Databricks ai_query)
    ├── AI: summary of key findings on every run       mart_key_findings        (Databricks ai_query)
    ▼
-Public Streamlit dashboard   (4 pages: Overview, Majors, Colleges & choices, Deep dive with a What-if tool)
+Public Streamlit dashboard   (4 pages: Overview, Majors, Colleges & choices, Deep dive with a What-if tool,
+                              plus an "Auto insights" page for any CSV, see below)
 
 All of it runs automatically from a Databricks Job when a new CSV arrives.
 Built with Claude Code as AI pair-engineer. Every step is tested with dbt (models + data tests).
@@ -83,6 +84,30 @@ Both tasks run the code on `main` straight from GitHub, so a merged PR is live o
 
 Extra columns are ignored, because staging only picks the columns it knows.
 
+## Auto insights (any CSV)
+A second, separate path for **any CSV with any columns**. It never touches the college pipeline above.
+
+1. **Drop a CSV** into `/Volumes/workspace/raw/auto_landing/` (new file name each time).
+2. **The Job `auto_insights_refresh`** ([definition](orchestration/auto_insights_job.yml)) runs [`auto_insights/profile_upload.py`](auto_insights/profile_upload.py). It loads the newest CSV into `workspace.auto_insights.latest_upload`, cleans the column names (snake_case) and profiles the first 50 columns (a random 1M-row sample for bigger files).
+3. **Each column gets a type**: numeric, category, date, or ID / free text (nearly every value unique, left out of the charts and the AI).
+4. **Results are added to `workspace.auto_insights`**, one set per upload (`upload_id` = time + file name):
+
+   | Table | What's in it |
+   |---|---|
+   | `uploads` | One row per finished upload: file, rows, columns, sampled or not |
+   | `column_profile` | Type, % missing, distinct count, min / quartiles / median / mean / max, date range |
+   | `top_values` | Top 10 values of each category column (50 or fewer distinct values) |
+   | `correlations` | Top 10 Pearson correlations between numeric columns |
+   | `group_insights` | Biggest differences in a numeric column's average across a category's groups (groups of 30+ rows) |
+   | `histograms` | 20 bins for up to 6 numeric columns, so charts work for past uploads too |
+   | `ai_report` | ONE `ai_query` report per upload (about 200 words) and the exact `input_facts` it was given |
+5. **The dashboard's "Auto insights" page** shows the latest upload (or any earlier one from the picker).
+
+The AI follows the same rules as above: only the numbers it's given, no invented causes, correlation isn't causation, Australian spelling.
+To test from a laptop: `python auto_insights/profile_upload.py` (uses the same env vars as dbt).
+
+⚠️ **Everything you upload ends up on the public dashboard, including the most common values.** Only use public or synthetic data, never anything personal or private.
+
 ## Tech stack
 | Layer | Tool |
 |---|---|
@@ -108,7 +133,7 @@ Extra columns are ignored, because staging only picks the columns it knows.
   - The exported job definition uses variables for the warehouse ID and the alert email.
 
 ## Limitations
-- **Same 18 columns only.** The pipeline expects the exact columns of `college_major_roi.csv`. A different CSV (other columns or a different topic) needs the dbt models adapted.
+- **Same 18 columns only.** The pipeline expects the exact columns of `college_major_roi.csv`. A different CSV (other columns or a different topic) needs the dbt models adapted. (Auto insights takes any CSV, but only gives a general profile, not a tailored analysis.)
 - **New data needs a new file name.** Re-uploading a file with the same name won't start the job.
 - **The dashboard can lag up to 1 hour** behind a job run, because it caches query results for an hour (the **Refresh data** button skips the wait).
 - The data is synthetic, and the findings describe groups, not causes.
@@ -136,6 +161,7 @@ Extra columns are ignored, because staging only picks the columns it knows.
 | Folder | What's in it |
 |---|---|
 | `ingestion/` | `databricks_load_raw.sql`: newest CSV → raw table (job task 1) |
+| `auto_insights/` | `profile_upload.py`: profiles any CSV + AI report (Auto insights job) |
 | `dbt/` | Models (staging → intermediate → marts, including AI marts), tests, macros |
 | `orchestration/` | The Databricks Job definition (YAML) |
 | `dashboards/` | The Streamlit app (`app.py`, `db.py`, `charts.py`, `views/`) |

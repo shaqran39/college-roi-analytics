@@ -1,0 +1,194 @@
+"""Page 5: Auto insights. The automatic profile, charts and AI report for any uploaded CSV.
+
+Reads only the workspace.auto_insights tables written by auto_insights/profile_upload.py.
+The picked upload goes into every query as a parameter; there's no free text and no upload button.
+"""
+
+import plotly.graph_objects as go
+import streamlit as st
+
+from charts import BLUE, style
+from db import md_safe, pretty, run_query
+
+SCHEMA = "workspace.auto_insights"
+TYPE_LABELS = {"numeric": "Numeric", "categorical": "Category", "date": "Date", "id_text": "ID / free text"}
+
+
+def for_upload(table: str, upload_id: str, order_by: str):
+    """All rows of one auto_insights table for the picked upload."""
+    return run_query(
+        f"select * from {SCHEMA}.{table} where upload_id = :upload_id order by {order_by}",
+        params={"upload_id": upload_id},
+    )
+
+
+def number(value: float) -> str:
+    """1234.5 -> '1,234.5', 0.123 -> '0.12'."""
+    return f"{value:,.0f}" if abs(value) >= 1000 or float(value).is_integer() else f"{value:,.2f}"
+
+
+st.title("Auto insights")
+st.markdown(
+    "An automatic first look at **any CSV**: what's in it, how complete it is, the main patterns, "
+    "and a short AI-written report. Each file dropped into the Databricks `auto_landing` folder is profiled by a job."
+)
+
+try:
+    uploads = run_query(f"select * from {SCHEMA}.uploads order by loaded_at desc")
+except Exception:
+    uploads = None
+if uploads is None or uploads.empty:
+    st.info(
+        "No uploads yet. When a CSV is dropped into the `auto_landing` folder in Databricks, "
+        "its profile and AI report will appear here a few minutes later.",
+        icon=":material/upload_file:",
+    )
+    st.stop()
+
+files = uploads.set_index("upload_id")
+upload_id = st.selectbox(
+    "Upload",
+    files.index.tolist(),  # newest first, so the latest is the default
+    format_func=lambda u: f"{files.loc[u, 'file_name']} (profiled {files.loc[u, 'loaded_at']:%d %b %Y, %H:%M} UTC)",
+)
+upload = files.loc[upload_id]
+
+profile = for_upload("column_profile", upload_id, "column_position")
+top_values = for_upload("top_values", upload_id, "column_name, value_rank")
+correlations = for_upload("correlations", upload_id, "correlation_rank")
+groups = for_upload("group_insights", upload_id, "insight_rank")
+histograms = for_upload("histograms", upload_id, "column_name, bin_index")
+reports = for_upload("ai_report", upload_id, "generated_at desc")
+
+# headline numbers
+type_counts = profile["column_type"].value_counts()
+col1, col2, col3, col4 = st.columns(4)
+col1.metric(
+    "Rows", f"{upload['row_count']:,}", border=True,
+    help=(f"Stats use a random sample of {upload['profiled_row_count']:,} rows." if upload["is_sampled"] else "Every row was profiled."),
+)
+col2.metric(
+    "Columns", f"{upload['column_count']}", border=True,
+    help=(f"Only the first {upload['profiled_column_count']} were profiled." if upload["profiled_column_count"] < upload["column_count"] else None),
+)
+col3.metric(
+    "Numeric / category / date", f"{type_counts.get('numeric', 0)} / {type_counts.get('categorical', 0)} / {type_counts.get('date', 0)}",
+    border=True, help="How each column was classified automatically.",
+)
+col4.metric(
+    "Average missing", f"{profile['null_pct'].mean():.1f}%", border=True,
+    help="Average share of empty cells across the profiled columns.",
+)
+if upload["is_sampled"]:
+    st.caption(f"Big file: the numbers below come from a random sample of {upload['profiled_row_count']:,} rows.")
+
+# data quality
+st.subheader("Data quality")
+st.dataframe(
+    profile.assign(
+        column=profile["column_name"],
+        kind=profile["column_type"].map(TYPE_LABELS),
+    )[["column", "kind", "null_pct", "distinct_count", "min_value", "median_value", "max_value", "min_date", "max_date"]],
+    hide_index=True,
+    width="stretch",
+    column_config={
+        "column": "Column",
+        "kind": st.column_config.TextColumn("Type", help="ID / free text = nearly every value is unique, so it's left out of the charts and the AI report."),
+        "null_pct": st.column_config.NumberColumn("% missing", format="%.1f%%"),
+        "distinct_count": st.column_config.NumberColumn("Distinct values", format="localized"),
+        "min_value": st.column_config.NumberColumn("Min", format="localized"),
+        "median_value": st.column_config.NumberColumn("Median", format="localized"),
+        "max_value": st.column_config.NumberColumn("Max", format="localized"),
+        "min_date": "First date",
+        "max_date": "Last date",
+    },
+)
+
+# histograms for the numeric columns
+if not histograms.empty:
+    st.subheader("Numeric columns")
+    st.caption("How the values are spread: 20 equal-width bins per column.")
+    chart_columns = st.columns(2)
+    for i, (name, bins) in enumerate(histograms.groupby("column_name", sort=False)):
+        fig = go.Figure(go.Bar(
+            x=(bins["bin_start"] + bins["bin_end"]) / 2,
+            y=bins["row_count"],
+            width=bins["bin_end"] - bins["bin_start"],
+            marker=dict(color=BLUE, line=dict(width=1, color="white")),
+            customdata=bins[["bin_start", "bin_end"]],
+            hovertemplate="%{customdata[0]:,.2f} to %{customdata[1]:,.2f}<br>Rows: %{y:,}<extra></extra>",
+        ))
+        fig.update_layout(title_text=pretty(name), bargap=0)
+        fig.update_yaxes(title_text="Rows")
+        style(fig, height=300, money_axis=None)
+        chart_columns[i % 2].plotly_chart(fig, width="stretch")
+
+# bar charts of the top values of each category column
+if not top_values.empty:
+    st.subheader("Category columns")
+    st.caption("Most common values, as a % of all rows (top 10 per column).")
+    chart_columns = st.columns(2)
+    for i, (name, values) in enumerate(top_values.groupby("column_name", sort=False)):
+        values = values.sort_values("value_rank", ascending=False)  # biggest at the top
+        fig = go.Figure(go.Bar(
+            x=values["pct_of_rows"],
+            y=values["value"],
+            orientation="h",
+            marker=dict(color=BLUE, cornerradius=4),
+            text=[f"{v:.1f}%" for v in values["pct_of_rows"]],
+            textposition="outside",
+            cliponaxis=False,
+            customdata=values["row_count"],
+            hovertemplate="<b>%{y}</b><br>%{x:.1f}% of rows (%{customdata:,})<extra></extra>",
+        ))
+        fig.update_layout(title_text=pretty(name), margin_r=60)
+        fig.update_xaxes(title_text="% of rows", range=[0, values["pct_of_rows"].max() * 1.15])
+        style(fig, height=30 * len(values) + 110, money_axis=None)
+        chart_columns[i % 2].plotly_chart(fig, width="stretch")
+
+# correlations and group differences
+if not correlations.empty:
+    st.subheader("Strongest correlations")
+    st.caption("Pearson r between pairs of numeric columns: near 1 or −1 = they move together closely, near 0 = no straight-line link. A link is not proof of cause.")
+    st.dataframe(
+        correlations.assign(strength=correlations["pearson_r"].abs().map(
+            lambda r: "strong" if r >= 0.6 else "moderate" if r >= 0.3 else "weak"))[["column_a", "column_b", "pearson_r", "strength"]],
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "column_a": "Column", "column_b": "Column",
+            "pearson_r": st.column_config.NumberColumn("Pearson r", format="%.2f"),
+            "strength": "Strength",
+        },
+    )
+
+if not groups.empty:
+    st.subheader("Biggest group differences")
+    st.caption("Average of a numeric column for each value of a category column (groups of 30+ rows only). "
+               "Strength 0 to 1 = how much of the spread the groups explain.")
+    st.dataframe(
+        groups.assign(
+            highest=groups["highest_group"] + " (" + groups["highest_mean"].map(number) + ")",
+            lowest=groups["lowest_group"] + " (" + groups["lowest_mean"].map(number) + ")",
+        )[["numeric_column", "category_column", "strength_eta_sq", "highest", "lowest", "overall_mean"]],
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "numeric_column": "Average of", "category_column": "By",
+            "strength_eta_sq": st.column_config.NumberColumn("Strength", format="%.2f"),
+            "highest": "Highest group", "lowest": "Lowest group",
+            "overall_mean": st.column_config.NumberColumn("Overall average", format="localized"),
+        },
+    )
+
+# AI report
+st.subheader("AI report")
+if reports.empty:
+    st.info("No AI report for this upload.")
+else:
+    report = reports.iloc[0]
+    with st.container(border=True):
+        st.markdown(md_safe(report["report_text"]))
+    st.caption(f"Written by AI (`{report['model_endpoint']}`) on {report['generated_at']:%d %b %Y}, using only the facts below.")
+    with st.expander("Facts the AI was given"):
+        st.text(report["input_facts"])
