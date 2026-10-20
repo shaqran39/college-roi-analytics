@@ -39,6 +39,11 @@ def run_query(query: str, params: dict | None = None) -> pd.DataFrame:
     Values that change, like a picked upload, go in params as named markers (`where id = :id`),
     never into the query text.
     """
+    return query_now(query, params)
+
+
+def query_now(query: str, params: dict | None = None) -> pd.DataFrame:
+    """Like run_query, but never cached: always asks Databricks. Only for checks that must be live."""
     creds = _credentials()
     # a fresh connection per (rare, cached) query, so an idle warehouse can't leave us a dead connection
     with sql.connect(

@@ -1,7 +1,8 @@
 """Page 5: Auto insights. The automatic profile, charts and AI report for any uploaded CSV.
 
 Reads only the workspace.auto_insights tables written by auto_insights/profile_upload.py.
-The picked upload goes into every query as a parameter; there's no free text and no upload button.
+The picked upload goes into every query as a parameter. Uploading a new CSV needs a password
+(see uploader.py); viewing is public.
 """
 
 import pandas as pd
@@ -10,6 +11,7 @@ import streamlit as st
 
 from charts import BLUE, style
 from db import md_safe, pretty, run_query
+from uploader import upload_box, upload_status
 
 SCHEMA = "workspace.auto_insights"
 TYPE_LABELS = {"numeric": "Numeric", "categorical": "Category", "date": "Date", "id_text": "ID / free text"}
@@ -41,8 +43,11 @@ def footer() -> None:
 st.title("Auto insights")
 st.markdown(
     "An automatic first look at **any CSV**: what's in it, how complete it is, the main patterns, "
-    "and a short AI-written report. Each file dropped into the Databricks `auto_landing` folder is profiled by a job."
+    "and a short AI-written report. Each CSV uploaded below (password needed) or dropped into the Databricks "
+    "`auto_landing` folder is profiled by a job."
 )
+upload_box()
+upload_status()
 
 try:
     uploads = run_query(f"select * from {SCHEMA}.uploads order by loaded_at desc")
@@ -57,9 +62,12 @@ if uploads is None or uploads.empty:
     footer()
 
 files = uploads.set_index("upload_id")
+if st.session_state.get("picked_upload") not in files.index:
+    st.session_state.pop("picked_upload", None)  # e.g. removed by the clean-up: fall back to the newest
 upload_id = st.selectbox(
     "Upload",
     files.index.tolist(),  # newest first, so the latest is the default
+    key="picked_upload",   # set by the upload tracker to switch to a fresh upload
     format_func=lambda u: f"{files.loc[u, 'file_name']} (profiled {files.loc[u, 'loaded_at']:%d %b %Y, %H:%M} UTC)",
 )
 upload = files.loc[upload_id]

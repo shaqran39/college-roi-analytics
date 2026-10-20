@@ -1,5 +1,6 @@
 streamlit>=1.65
 databricks-sql-connector>=3.0
+databricks-sdk>=0.40
 pandas
 pyarrow
 plotly
