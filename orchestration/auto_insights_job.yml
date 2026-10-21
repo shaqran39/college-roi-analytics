@@ -4,6 +4,7 @@
 # When a new CSV (any columns) lands in /Volumes/workspace/raw/auto_landing/, it runs
 # auto_insights/profile_upload.py: load the newest CSV, profile it, write ONE AI report,
 # all into the workspace.auto_insights schema. Separate from college_roi_refresh.
+# At the end it cleans up old CSVs and old results (retention); a clean-up error only logs a warning.
 # Any failure stops the job and sends an email.
 #
 # No secrets in here. Fill in the variable for your own workspace:
@@ -52,4 +53,5 @@ resources:
         - environment_key: auto-insights-default
           spec:
             environment_version: "6"
-            # no extra dependencies: in the Job the script uses spark.sql, not the connector
+            # no extra dependencies: in the Job the script uses spark.sql, not the connector,
+            # and deletes old files with os.remove on the /Volumes path

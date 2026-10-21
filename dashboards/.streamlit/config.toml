@@ -4,3 +4,7 @@ primaryColor = "#2a78d6"
 
 [client]
 toolbarMode = "minimal"
+
+[server]
+# biggest upload in MB (the Auto insights uploader also checks this)
+maxUploadSize = 10

@@ -1,14 +1,17 @@
 """Page 5: Auto insights. The automatic profile, charts and AI report for any uploaded CSV.
 
 Reads only the workspace.auto_insights tables written by auto_insights/profile_upload.py.
-The picked upload goes into every query as a parameter; there's no free text and no upload button.
+The picked upload goes into every query as a parameter. Uploading a new CSV needs a password
+(see uploader.py); viewing is public.
 """
 
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from charts import BLUE, style
 from db import md_safe, pretty, run_query
+from uploader import upload_box, upload_status
 
 SCHEMA = "workspace.auto_insights"
 TYPE_LABELS = {"numeric": "Numeric", "categorical": "Category", "date": "Date", "id_text": "ID / free text"}
@@ -40,8 +43,11 @@ def footer() -> None:
 st.title("Auto insights")
 st.markdown(
     "An automatic first look at **any CSV**: what's in it, how complete it is, the main patterns, "
-    "and a short AI-written report. Each file dropped into the Databricks `auto_landing` folder is profiled by a job."
+    "and a short AI-written report. Each CSV uploaded below (password needed) or dropped into the Databricks "
+    "`auto_landing` folder is profiled by a job."
 )
+upload_box()
+upload_status()
 
 try:
     uploads = run_query(f"select * from {SCHEMA}.uploads order by loaded_at desc")
@@ -56,9 +62,12 @@ if uploads is None or uploads.empty:
     footer()
 
 files = uploads.set_index("upload_id")
+if st.session_state.get("picked_upload") not in files.index:
+    st.session_state.pop("picked_upload", None)  # e.g. removed by the clean-up: fall back to the newest
 upload_id = st.selectbox(
     "Upload",
     files.index.tolist(),  # newest first, so the latest is the default
+    key="picked_upload",   # set by the upload tracker to switch to a fresh upload
     format_func=lambda u: f"{files.loc[u, 'file_name']} (profiled {files.loc[u, 'loaded_at']:%d %b %Y, %H:%M} UTC)",
 )
 upload = files.loc[upload_id]
@@ -94,26 +103,33 @@ if upload["is_sampled"]:
 
 # data quality
 st.subheader("Data quality")
-# formatted with a Styler so missing values show as empty cells, not "None" (sorting still uses the real values)
+# min/median/max and the dates are often empty (they only apply to some column types). st.dataframe ignores
+# a Styler's na_rep and shows "None", so those columns become display text here, with "" for missing.
+# % missing and distinct values are never empty, so they stay numbers (and sort as numbers).
+def as_text(values, formatter=str):
+    return values.map(lambda v: "" if pd.isna(v) else formatter(v))
+
+
 st.dataframe(
     profile.assign(
         column=profile["column_name"],
         kind=profile["column_type"].map(TYPE_LABELS),
-    )[["column", "kind", "null_pct", "distinct_count", "min_value", "median_value", "max_value", "min_date", "max_date"]]
-    .style.format(
-        {"null_pct": "{:.1f}%", "distinct_count": "{:,}", "min_value": number, "median_value": number, "max_value": number},
-        na_rep="",
-    ),
+        min_value=as_text(profile["min_value"], number),
+        median_value=as_text(profile["median_value"], number),
+        max_value=as_text(profile["max_value"], number),
+        min_date=as_text(profile["min_date"]),
+        max_date=as_text(profile["max_date"]),
+    )[["column", "kind", "null_pct", "distinct_count", "min_value", "median_value", "max_value", "min_date", "max_date"]],
     hide_index=True,
     width="stretch",
     column_config={
         "column": "Column",
         "kind": st.column_config.TextColumn("Type", help="ID / free text = nearly every value is unique, so it's left out of the charts and the AI report."),
-        "null_pct": "% missing",
-        "distinct_count": "Distinct values",
-        "min_value": "Min",
-        "median_value": "Median",
-        "max_value": "Max",
+        "null_pct": st.column_config.NumberColumn("% missing", format="%.1f%%"),
+        "distinct_count": st.column_config.NumberColumn("Distinct values", format="localized"),
+        "min_value": st.column_config.TextColumn("Min", alignment="right"),
+        "median_value": st.column_config.TextColumn("Median", alignment="right"),
+        "max_value": st.column_config.TextColumn("Max", alignment="right"),
         "min_date": "First date",
         "max_date": "Last date",
     },

@@ -20,7 +20,7 @@ Shaqran is learning AI-assisted data engineering. When you make changes:
 - Ingestion (cloud): CSVs uploaded to the volume `/Volumes/workspace/raw/landing`, tables created by `ingestion/databricks_load_raw.sql`
 - Transformation: dbt Core in `dbt/` (run all dbt commands from inside the `dbt/` folder)
 - AI in pipeline: Databricks `ai_query` (per-major report cards, findings summary). Only run these on Databricks, and guard them with `{{ config(enabled = target.type == 'databricks') }}` (not `target.name`: the scheduled Databricks Job's dbt task uses its own target name)
-- Auto insights (separate from the college pipeline): `auto_insights/profile_upload.py` profiles the newest CSV in the volume `/Volumes/workspace/raw/auto_landing/` into the schema `workspace.auto_insights` (Job `auto_insights_refresh`, dashboard page `views/auto_insights.py`). No dbt. Don't mix it with `raw.landing` or the college schemas
+- Auto insights (separate from the college pipeline): `auto_insights/profile_upload.py` profiles the newest CSV in the volume `/Volumes/workspace/raw/auto_landing/` into the schema `workspace.auto_insights` (Job `auto_insights_refresh`, dashboard page `views/auto_insights.py`, which also has a password-protected uploader in `dashboards/uploader.py` that writes to the volume with its own upload-only token). No dbt. Don't mix it with `raw.landing` or the college schemas. After each successful run it deletes CSVs older than 7 days (never the newest) and results older than 30 days (always keeping the 3 newest uploads); test with `--cleanup-dry-run`
 - Dashboard: Streamlit app in `dashboards/`, deployed to Streamlit Community Cloud (public)
 - OS: Windows. Use PowerShell-friendly commands. The venv lives in `.venv`.
 - Databricks credentials come from env vars DATABRICKS_HOST, DATABRICKS_HTTP_PATH, DATABRICKS_TOKEN
@@ -56,5 +56,5 @@ dbt docs generate; dbt docs serve
 
 ## Do not
 - Commit anything in `data/raw/` or `warehouse/` (they're gitignored, the data is too big)
-- Delete or overwrite raw data
+- Delete or overwrite raw data. The ONLY exception is the retention clean-up in `auto_insights/profile_upload.py` (`cleanup()`): it may delete old CSVs ONLY in `/Volumes/workspace/raw/auto_landing/` and old rows ONLY in `workspace.auto_insights`. Never add deleting code anywhere else, and never point it at `raw.landing` or the college schemas
 - Commit secrets or credentials (e.g. Databricks tokens). Use environment variables.
