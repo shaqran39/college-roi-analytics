@@ -1,7 +1,8 @@
 """Page 5: Auto insights. The automatic profile, charts and AI report for any uploaded CSV.
 
 Reads only the workspace.auto_insights tables written by auto_insights/profile_upload.py.
-The picked upload goes into every query as a parameter. Uploading a new CSV needs a password
+Only the newest upload is shown (the clean-up keeps only that one); its upload_id goes into
+every query as a parameter. Uploading a new CSV needs a password
 (see uploader.py); viewing is public.
 """
 
@@ -18,7 +19,7 @@ TYPE_LABELS = {"numeric": "Numeric", "categorical": "Category", "date": "Date", 
 
 
 def for_upload(table: str, upload_id: str, order_by: str):
-    """All rows of one auto_insights table for the picked upload."""
+    """All rows of one auto_insights table for one upload."""
     return run_query(
         f"select * from {SCHEMA}.{table} where upload_id = :upload_id order by {order_by}",
         params={"upload_id": upload_id},
@@ -50,7 +51,7 @@ upload_box()
 upload_status()
 
 try:
-    uploads = run_query(f"select * from {SCHEMA}.uploads order by loaded_at desc")
+    uploads = run_query(f"select * from {SCHEMA}.uploads order by loaded_at desc limit 1")
 except Exception:
     uploads = None
 if uploads is None or uploads.empty:
@@ -61,16 +62,11 @@ if uploads is None or uploads.empty:
     )
     footer()
 
-files = uploads.set_index("upload_id")
-if st.session_state.get("picked_upload") not in files.index:
-    st.session_state.pop("picked_upload", None)  # e.g. removed by the clean-up: fall back to the newest
-upload_id = st.selectbox(
-    "Upload",
-    files.index.tolist(),  # newest first, so the latest is the default
-    key="picked_upload",   # set by the upload tracker to switch to a fresh upload
-    format_func=lambda u: f"{files.loc[u, 'file_name']} (profiled {files.loc[u, 'loaded_at']:%d %b %Y, %H:%M} UTC)",
-)
-upload = files.loc[upload_id]
+# the newest upload only; when a new one is ready, the upload tracker clears the cache and reruns the page
+upload = uploads.iloc[0]
+upload_id = upload["upload_id"]
+st.markdown(f"**{upload['file_name']}** (profiled {upload['loaded_at']:%d %b %Y, %H:%M} UTC)")
+st.caption("Showing the latest upload. Each new upload replaces the previous one.")
 
 profile = for_upload("column_profile", upload_id, "column_position")
 top_values = for_upload("top_values", upload_id, "column_name, value_rank")
