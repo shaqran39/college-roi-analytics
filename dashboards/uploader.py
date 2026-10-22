@@ -156,9 +156,8 @@ def _tracker() -> None:
     except Exception:
         found = None  # a failed check just waits for the next one
     if found is not None and not found.empty:
-        run_query.clear()                                   # so the new upload shows up in the list
-        state.picked_upload = found["upload_id"].iloc[0]    # and gets picked automatically
-        state.upload_message = ("done", f"**{pending['file_name']}** is ready. It's picked below.")
+        run_query.clear()  # so the page rerun below shows the new upload (the newest one) right away
+        state.upload_message = ("done", f"**{pending['file_name']}** is ready. It's shown below.")
         state.pending_upload = None
         st.rerun()
     if elapsed > GIVE_UP_SECONDS:
@@ -175,4 +174,4 @@ def _tracker() -> None:
                if starting else
                ":material/check_circle: Waiting for Databricks to start\n\n:material/pending: **Processing** (usually 3 to 5 minutes)")
         )
-        st.caption(f"Checks every {POLL_SECONDS} seconds. Keep this tab open; the result is picked automatically when it's ready.")
+        st.caption(f"Checks every {POLL_SECONDS} seconds. Keep this tab open; the result is shown automatically when it's ready.")

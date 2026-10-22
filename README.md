@@ -90,7 +90,7 @@ A second, separate path for **any CSV with any columns**. It never touches the c
 1. **Drop a CSV** into `/Volumes/workspace/raw/auto_landing/` (new file name each time).
 2. **The Job `auto_insights_refresh`** ([definition](orchestration/auto_insights_job.yml)) runs [`auto_insights/profile_upload.py`](auto_insights/profile_upload.py). It loads the newest CSV into `workspace.auto_insights.latest_upload`, cleans the column names (snake_case) and profiles the first 50 columns (a random 1M-row sample for bigger files).
 3. **Each column gets a type**: numeric, category, date, or ID / free text (nearly every value unique, left out of the charts and the AI).
-4. **Results are added to `workspace.auto_insights`**, one set per upload (`upload_id` = time + file name):
+4. **Results are written to `workspace.auto_insights`**, tagged with an `upload_id` (time + file name):
 
    | Table | What's in it |
    |---|---|
@@ -99,9 +99,10 @@ A second, separate path for **any CSV with any columns**. It never touches the c
    | `top_values` | Top 10 values of each category column (50 or fewer distinct values) |
    | `correlations` | Top 10 Pearson correlations between numeric columns |
    | `group_insights` | Biggest differences in a numeric column's average across a category's groups (groups of 30+ rows) |
-   | `histograms` | 20 bins for up to 6 numeric columns, so charts work for past uploads too |
+   | `histograms` | 20 bins for up to 6 numeric columns, for the charts |
    | `ai_report` | ONE `ai_query` report per upload (about 200 words) and the exact `input_facts` it was given |
-5. **The dashboard's "Auto insights" page** shows the latest upload (or any earlier one from the picker).
+5. **The dashboard's "Auto insights" page** shows only the latest upload.
+6. **Latest upload only.** After each successful run, the clean-up deletes every CSV in `auto_landing` except the newest, and every older upload's rows in `workspace.auto_insights`, however recent. So each new upload replaces the previous one. A clean-up problem only logs a warning; the new profile is already saved. To see what it would delete without deleting anything: `python auto_insights/profile_upload.py --cleanup-dry-run`.
 
 The AI follows the same rules as above: only the numbers it's given, no invented causes, correlation isn't causation, Australian spelling.
 To test from a laptop: `python auto_insights/profile_upload.py` (uses the same env vars as dbt).

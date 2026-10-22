@@ -16,23 +16,22 @@ Column names can't be parameters, so they are cleaned to snake_case and backtick
 Separate from the college ROI pipeline: it only touches workspace.raw.auto_landing
 and the workspace.auto_insights schema.
 
-After each successful run it cleans up (see cleanup()): old CSVs in auto_landing and old
-uploads' rows in workspace.auto_insights. This is the ONLY code in the project allowed to delete.
+After each successful run it cleans up (see cleanup()): "latest upload only", so every CSV in
+auto_landing except the newest, and every older upload's rows in workspace.auto_insights, are deleted.
+This is the ONLY code in the project allowed to delete.
 """
 
 import argparse
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 LANDING_PATH = "/Volumes/workspace/raw/auto_landing/"
 SCHEMA = "workspace.auto_insights"
 AI_MODEL = "databricks-meta-llama-3-3-70b-instruct"
 
-# clean-up after each successful run (retention)
-KEEP_FILES_DAYS = 7         # CSVs in auto_landing older than this are deleted (the newest CSV is always kept)
-KEEP_RESULTS_DAYS = 30      # rows in workspace.auto_insights for uploads older than this are deleted...
-KEEP_NEWEST_UPLOADS = 3     # ...except the 3 newest uploads, which are always kept
+# clean-up after each successful run: keep ONLY the newest CSV and ONLY the newest upload's results,
+# however recent the older ones are (each new upload replaces the previous one)
 
 MAX_COLUMNS = 50            # profile at most the first 50 columns
 MAX_ROWS = 1_000_000        # bigger files are profiled on a random sample of this many rows
@@ -513,37 +512,34 @@ def delete_file(path: str) -> None:
 
 
 def cleanup(dry_run: bool = False) -> None:
-    """Delete old CSVs and old uploads' results. With dry_run=True, only print what WOULD be deleted.
+    """Keep only the latest upload. With dry_run=True, only print what WOULD be deleted.
 
-    - CSVs in auto_landing older than KEEP_FILES_DAYS, but never the newest CSV.
-    - Rows in every workspace.auto_insights table (the ones with an upload_id) for uploads older than
-      KEEP_RESULTS_DAYS, but never the KEEP_NEWEST_UPLOADS newest uploads.
+    - Every CSV in auto_landing except the newest one.
+    - Rows in every workspace.auto_insights table (the ones with an upload_id) for every upload older
+      than the newest finished upload.
     latest_upload and profile_sample hold no upload_id (they're replaced every run), so they're left alone.
     """
     verb = "Would delete" if dry_run else "Deleted"
-    now = datetime.now(timezone.utc)
     print("\nClean-up" + (" (DRY RUN: nothing is deleted)" if dry_run else ""))
 
-    # 1. old CSV files (list_csvs is newest first, so [1:] always skips the newest)
-    file_cutoff = now - timedelta(days=KEEP_FILES_DAYS)
-    old_files = [f for f in list_csvs()[1:] if f[2] < file_cutoff]
+    # 1. every CSV but the newest (list_csvs is newest first, so [1:] always skips the newest)
+    old_files = list_csvs()[1:]
     for path, name, modified in old_files:
         if not dry_run:
             delete_file(path)
         print(f"  {verb} file {name} (last changed {modified:%Y-%m-%d %H:%M} UTC)")
     if not old_files:
-        print(f"  No CSV files older than {KEEP_FILES_DAYS} days to delete.")
+        print("  No older CSV files to delete (only the newest is there).")
 
-    # 2. old results. upload_id starts with the run time (20260920_101500_<file name>), so it sorts by age,
-    # and also catches leftover rows from a run that failed before it wrote its uploads row
-    keep = [row["upload_id"] for row in run_sql(
-        f"select upload_id from {SCHEMA}.uploads order by loaded_at desc limit {KEEP_NEWEST_UPLOADS}"
-    )]
-    params = {"cutoff": f"{now - timedelta(days=KEEP_RESULTS_DAYS):%Y%m%d_%H%M%S}"}
-    params.update({f"keep_{i}": upload_id for i, upload_id in enumerate(keep)})
-    where = "upload_id rlike '^[0-9]{8}_[0-9]{6}_' and left(upload_id, 15) < :cutoff"
-    if keep:
-        where += " and upload_id not in (" + ", ".join(f":keep_{i}" for i in range(len(keep))) + ")"
+    # 2. every upload older than the newest finished one. upload_id starts with the run time
+    # (20260920_101500_<file name>), so "<" means older; it also catches leftover rows from a run that
+    # failed before it wrote its uploads row, and never touches a newer run that's still going
+    newest = run_sql(f"select upload_id from {SCHEMA}.uploads order by loaded_at desc limit 1")
+    if not newest:
+        print("  No finished uploads yet, so no results are deleted.")
+        return
+    params = {"keep": newest[0]["upload_id"]}
+    where = "upload_id rlike '^[0-9]{8}_[0-9]{6}_' and upload_id < :keep"
 
     # uploads first, so the dashboard stops listing an upload before its details go
     total = 0
@@ -560,7 +556,7 @@ def cleanup(dry_run: bool = False) -> None:
         total += found["n"]
         print(f"  {verb} {found['n']:,} rows from {table} ({found['uploads']} uploads: {found['ids']})")
     if not total:
-        print(f"  No uploads older than {KEEP_RESULTS_DAYS} days to delete (the {KEEP_NEWEST_UPLOADS} newest are always kept).")
+        print(f"  No older uploads to delete (keeping only {params['keep']}).")
 
 
 # ---------- main ----------
