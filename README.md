@@ -90,7 +90,7 @@ A second, separate path for **any CSV with any columns**. It never touches the c
 1. **Drop a CSV** into `/Volumes/workspace/raw/auto_landing/` (new file name each time).
 2. **The Job `auto_insights_refresh`** ([definition](orchestration/auto_insights_job.yml)) runs [`auto_insights/profile_upload.py`](auto_insights/profile_upload.py). It loads the newest CSV into `workspace.auto_insights.latest_upload`, cleans the column names (snake_case) and profiles the first 50 columns (a random 1M-row sample for bigger files).
 3. **Each column gets a type**: numeric, category, date, or ID / free text (nearly every value unique, left out of the charts and the AI).
-4. **Results are written to `workspace.auto_insights`**, tagged with an `upload_id` (time + file name):
+4. **Results are written to `workspace.auto_insights`**, tagged with an `upload_id` (time + file name, which includes a random part for uploads from the app):
 
    | Table | What's in it |
    |---|---|
@@ -101,13 +101,14 @@ A second, separate path for **any CSV with any columns**. It never touches the c
    | `group_insights` | Biggest differences in a numeric column's average across a category's groups (groups of 30+ rows) |
    | `histograms` | 20 bins for up to 6 numeric columns, for the charts |
    | `ai_report` | ONE `ai_query` report per upload (about 200 words) and the exact `input_facts` it was given |
-5. **The dashboard's "Auto insights" page** shows only the latest upload.
-6. **Latest upload only.** After each successful run, the clean-up deletes every CSV in `auto_landing` except the newest, and every older upload's rows in `workspace.auto_insights`, however recent. So each new upload replaces the previous one. A clean-up problem only logs a warning; the new profile is already saved. To see what it would delete without deleting anything: `python auto_insights/profile_upload.py --cleanup-dry-run`.
+5. **The dashboard's "Auto insights" page is private per upload.** Everyone sees an **Example** (made-up café data) by default. After you upload a CSV (password needed), that browser session shows only *your* results, plus a private link (`?report=<id>`) you can share. The id contains 22 random characters, so it can't be guessed, and the link works for 24 hours. There is no list of uploads, so nobody can browse anyone else's. A wrong or expired link shows a friendly message and the Example.
+6. **24-hour retention.** After each successful run, the clean-up deletes the CSV it just profiled, any other CSV in `auto_landing` older than 1 hour (an upload that never got profiled), and every upload's rows in `workspace.auto_insights` once they're more than 24 hours old. The Example (`upload_id = 'example'`) is never deleted. A clean-up problem only logs a warning; the new profile is already saved. To see what it would delete without deleting anything: `python auto_insights/profile_upload.py --cleanup-dry-run`.
+7. **The Example** was created once with `python auto_insights/profile_upload.py --as-example data/raw/cafe_sales_test.csv`. Its CSV is kept in the volume `workspace.auto_insights.example_data` (not `auto_landing`, so it doesn't start the Job). Running it again does nothing if the Example already exists.
 
 The AI follows the same rules as above: only the numbers it's given, no invented causes, correlation isn't causation, Australian spelling.
 To test from a laptop: `python auto_insights/profile_upload.py` (uses the same env vars as dbt).
 
-⚠️ **Everything you upload ends up on the public dashboard, including the most common values.** Only use public or synthetic data, never anything personal or private.
+⚠️ **Uploads are private, but anyone you give the link to can see them for 24 hours, and the data is processed in Databricks.** Still only use public or synthetic data, never anything personal or sensitive.
 
 ## Tech stack
 | Layer | Tool |
