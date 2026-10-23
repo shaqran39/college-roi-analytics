@@ -1,8 +1,16 @@
-"""Page 1: the AI-written key findings plus four headline numbers."""
+"""Page 1: the landing page. What the project is, how it works, four headline numbers and the AI key findings."""
 
 import streamlit as st
 
-from db import load_mart, md_safe, money, pretty
+from db import REPO_URL, data_updated, load_mart, md_safe, money, page_header, pretty
+
+STEPS = [  # the "How it works" strip: (icon, step, what happens)
+    (":material/description:", "CSV", "30,000 synthetic graduates, one row each"),
+    (":material/database:", "Databricks", "Loaded into a raw table in the lakehouse"),
+    (":material/account_tree:", "dbt", "Cleaned, joined and summarised, with tests"),
+    (":material/auto_awesome:", "AI", "ai_query writes report cards from the numbers"),
+    (":material/dashboard:", "Dashboard", "This app, reading the finished tables"),
+]
 
 roi_by_major = load_mart("mart_roi_by_major")
 choices = load_mart("mart_choices_effect")
@@ -15,14 +23,27 @@ internship_lift = choices.loc[
     "net_roi_lift_usd",
 ].iloc[0]
 
-st.title("Does college pay off?")
-st.markdown(
+page_header(
+    "Does college pay off?",
     "Which majors and college types paid off over 10 years, and how much did internships, "
     "finishing on time and debt change the answer? "
-    "**Net return** = extra earnings vs a high-school graduate over 10 years, minus the net cost of college."
+    "**Net return** = extra earnings vs a high-school graduate over 10 years, minus the net cost of college.",
+    data_updated(),
+)
+st.markdown(
+    "An end-to-end analytics project: a CSV of **30,000 synthetic graduates** goes through Databricks, dbt and AI "
+    "into this dashboard. Explore the results below, or profile **your own CSV** with Auto insights."
 )
 
+# how it works
+st.subheader("How it works")
+for column, (icon, step, detail) in zip(st.columns(len(STEPS)), STEPS):
+    with column.container(border=True):
+        st.markdown(f"{icon} **{step}**")
+        st.caption(detail)
+
 # headline numbers
+st.subheader("Headline numbers")
 col1, col2, col3, col4 = st.columns(4)
 col1.metric(
     "Graduates analysed",
@@ -51,10 +72,15 @@ col4.metric(
     border=True,
 )
 
+button1, button2, _ = st.columns([1, 1, 2])
+if button1.button("Profile your own CSV", type="primary", icon=":material/upload_file:", width="stretch"):
+    st.switch_page("views/auto_insights.py")
+button2.link_button("Source code on GitHub", REPO_URL, icon=":material/code:", width="stretch")
+
 # AI summary
 st.subheader("Key findings")
-st.markdown(f"> {md_safe(findings['summary_paragraph'])}")
-st.caption(f"Written by AI (`{findings['model_endpoint']}`) on {findings['generated_at']:%d %b %Y}, using only the facts below.")
-
-with st.expander("Check the numbers: the exact facts the AI was given"):
-    st.text(findings["input_facts"])
+with st.container(border=True):
+    st.markdown(md_safe(findings["summary_paragraph"]))
+    st.caption(f"Written by AI (`{findings['model_endpoint']}`) on {findings['generated_at']:%d %b %Y}, using only the facts below.")
+    with st.expander("Check the numbers: the exact facts the AI was given"):
+        st.text(findings["input_facts"])

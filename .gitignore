@@ -35,3 +35,6 @@ logs/
 # OS
 Thumbs.db
 desktop.ini
+
+# Local screenshots of the dashboard (before / after design changes)
+screenshots/

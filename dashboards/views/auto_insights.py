@@ -7,6 +7,8 @@ Each upload is private. The page shows exactly one upload, picked in this order:
   3. the pinned Example (upload_id 'example', made-up café data)
 There's no list or picker, so nobody can browse other people's uploads. The upload_id always goes
 into queries as a parameter. Uploading a new CSV needs a password (see uploader.py).
+
+The page only shows what applies to the file: a tab or section with nothing in it isn't drawn.
 """
 
 import re
@@ -16,14 +18,16 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from charts import BLUE, style
-from db import md_safe, pretty, query_now, run_query
+from charts import BLUE, GREY, ORANGE, show, style, zero_line
+from db import md_safe, page_header, pretty, query_now, run_query
 from uploader import display_name, upload_box, upload_status
 
 SCHEMA = "workspace.auto_insights"
-TYPE_LABELS = {"numeric": "Numeric", "categorical": "Category", "date": "Date", "id_text": "ID / free text"}
+TYPE_LABELS = {"numeric": "Numeric", "categorical": "Category", "boolean": "Yes / no", "date": "Date", "id_text": "ID / free text"}
+UNIT_LABELS = {"currency": "Money ($)", "percent": "%"}
 EXAMPLE_ID = "example"
 LINK_HOURS = 24  # keep in step with RESULTS_KEEP_HOURS in auto_insights/profile_upload.py
+FLAT_PCT = 5     # keep in step with FLAT_PCT in auto_insights/profile_upload.py
 # <run time>_upload_<upload time>_<22 random characters>_<clean name>.csv (see landing_name in uploader.py)
 REPORT_ID = re.compile(r"[0-9]{8}_[0-9]{6}_upload_[0-9]{8}T[0-9]{6}Z_[A-Za-z0-9_-]{22}_[a-z0-9_]{1,60}\.csv")
 
@@ -59,17 +63,26 @@ def private_upload(report_id) -> pd.Series | None:
     return upload if as_utc(upload["loaded_at"]) + timedelta(hours=LINK_HOURS) > pd.Timestamp.now(tz="UTC") else None
 
 
-def for_upload(table: str, upload_id: str, order_by: str):
-    """All rows of one auto_insights table for one upload."""
-    return run_query(
-        f"select * from {SCHEMA}.{table} where upload_id = :upload_id order by {order_by}",
-        params={"upload_id": upload_id},
-    )
+def for_upload(table: str, upload_id: str, order_by: str) -> pd.DataFrame:
+    """All rows of one auto_insights table for one upload. Empty if the table has none (or doesn't exist yet:
+    column_details, time_series and time_patterns only appear after the first run of the newer profiler)."""
+    try:
+        return run_query(
+            f"select * from {SCHEMA}.{table} where upload_id = :upload_id order by {order_by}",
+            params={"upload_id": upload_id},
+        )
+    except Exception:
+        return pd.DataFrame()
 
 
 def number(value: float) -> str:
     """1234.5 -> '1,234.5', 0.123 -> '0.12'."""
     return f"{value:,.0f}" if abs(value) >= 1000 or float(value).is_integer() else f"{value:,.2f}"
+
+
+def as_text(values: pd.Series, formatter=str) -> pd.Series:
+    """Display text with "" for missing. st.dataframe ignores a Styler's na_rep and shows "None"."""
+    return values.map(lambda v: "" if pd.isna(v) else formatter(v))
 
 
 def footer() -> None:
@@ -82,11 +95,285 @@ def footer() -> None:
     st.stop()
 
 
-st.title("Auto insights")
-st.markdown(
-    "An automatic first look at **any CSV**: what's in it, how complete it is, the main patterns, "
-    "and a short AI-written report. Upload a CSV below (password needed) and only you see the results, "
-    "for 24 hours."
+# ---------- the parts of each tab ----------
+
+def column_notes(row: pd.Series) -> str:
+    """Short notes for the Data quality table: date format, skew, outliers, a dominant value."""
+    notes = []
+    if pd.notna(row.get("date_format")):
+        notes.append(f"read as {row['date_format']}" + (" (day/month ambiguous)" if pd.notna(row.get("date_note")) else ""))
+    if pd.notna(row.get("skew_direction")) and row["skew_direction"] != "roughly symmetric":
+        notes.append("skewed " + row["skew_direction"].split(" (")[0])
+    if pd.notna(row.get("outlier_count")) and row["outlier_count"] > 0:
+        notes.append(f"{int(row['outlier_count']):,} outliers ({row['outlier_pct']:.1f}%)")
+    if pd.notna(row.get("is_dominated")) and bool(row["is_dominated"]):
+        notes.append(f"one value is {row['top_value_pct']:.0f}%")
+    return "; ".join(notes)
+
+
+def data_quality(profile: pd.DataFrame, details: pd.DataFrame) -> None:
+    st.subheader("Data quality")
+    table = profile.merge(details.drop(columns="upload_id"), on="column_name", how="left") if not details.empty else profile.copy()
+    for column in ("unit", "date_format", "date_note", "skew_direction", "outlier_count", "outlier_pct", "top_value_pct", "is_dominated"):
+        if column not in table:
+            table[column] = None
+    notes = table.apply(column_notes, axis=1)
+    # the table can't wrap text, so Notes is made as wide as its longest note (about 8px a character)
+    notes_width = max(120, 8 * int(notes.str.len().max() or 0) + 32)
+    # a date column's first / last date goes in Min / Max, so there are no separate date columns
+    # and the table fits the page with Notes in full
+    st.dataframe(
+        table.assign(
+            column=table["column_name"],
+            kind=table["column_type"].map(TYPE_LABELS),
+            unit=as_text(table["unit"].map(UNIT_LABELS)),
+            min_value=as_text(table["min_value"], number).where(table["min_date"].isna(), as_text(table["min_date"])),
+            median_value=as_text(table["median_value"], number),
+            max_value=as_text(table["max_value"], number).where(table["max_date"].isna(), as_text(table["max_date"])),
+            notes=notes,
+        )[["column", "kind", "unit", "null_pct", "distinct_count", "min_value", "median_value", "max_value", "notes"]],
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "column": "Column",
+            "kind": st.column_config.TextColumn("Type", help="ID / free text = nearly every value is unique, so it's left out of the charts and the AI report."),
+            "unit": st.column_config.TextColumn("Unit", width=100,  # wide enough for "Money ($)"
+                                                help="Found from symbols in the values ($, %) or the column name."),
+            "null_pct": st.column_config.ProgressColumn("% missing", format="%.1f%%", min_value=0, max_value=100),
+            "distinct_count": st.column_config.NumberColumn("Distinct", format="localized", help="Number of different values."),
+            # 100px fits a date like 2026-01-01
+            "min_value": st.column_config.TextColumn("Min / first", width=100, alignment="right", help="Lowest value, or the first date."),
+            "median_value": st.column_config.TextColumn("Median", alignment="right"),
+            "max_value": st.column_config.TextColumn("Max / last", width=100, alignment="right", help="Highest value, or the last date."),
+            "notes": st.column_config.TextColumn("Notes", width=notes_width, help="Outliers = values more than 1.5 × the middle-half range outside it."),
+        },
+    )
+
+
+def ai_report(reports: pd.DataFrame) -> None:
+    st.subheader("AI report")
+    if reports.empty:
+        st.info("No AI report for this upload.", icon=":material/info:")
+        return
+    report = reports.iloc[0]
+    with st.container(border=True):
+        st.markdown(md_safe(report["report_text"]))
+    st.caption(f"Written by AI (`{report['model_endpoint']}`) on {report['generated_at']:%d %b %Y}, using only the facts below.")
+    with st.expander("Facts the AI was given"):
+        st.text(report["input_facts"])
+
+
+def numeric_columns(histograms: pd.DataFrame, details: pd.DataFrame) -> None:
+    st.subheader("Numeric columns")
+    if histograms.empty:
+        st.caption("These columns have only one value each, so there's no spread to chart.")
+        return
+    st.caption("How the values are spread: 20 equal-width bins per column (the 6 most complete columns).")
+    notes = details.set_index("column_name") if not details.empty else pd.DataFrame()
+    chart_columns = st.columns(2)
+    for i, (name, bins) in enumerate(histograms.groupby("column_name", sort=False)):
+        fig = go.Figure(go.Bar(
+            x=(bins["bin_start"] + bins["bin_end"]) / 2,
+            y=bins["row_count"],
+            width=bins["bin_end"] - bins["bin_start"],
+            marker=dict(color=BLUE, line=dict(width=1, color="white")),
+            customdata=bins[["bin_start", "bin_end"]],
+            hovertemplate="%{customdata[0]:,.2f} to %{customdata[1]:,.2f}<br>Rows: %{y:,}<extra></extra>",
+        ))
+        unit = notes.loc[name, "unit"] if name in notes.index else None
+        fig.update_layout(title_text=pretty(name), bargap=0)
+        fig.update_xaxes(title_text={"currency": "$", "percent": "%"}.get(unit, ""))
+        fig.update_yaxes(title_text="Rows")
+        style(fig, height=300, money_axis=None)
+        with chart_columns[i % 2]:
+            show(fig)
+            if name in notes.index:
+                note = column_notes(notes.loc[name])
+                if note:
+                    st.caption(note.capitalize())
+
+
+def category_columns(top_values: pd.DataFrame) -> None:
+    st.subheader("Category columns")
+    st.caption("Most common values, as a % of all rows (top 10 per column; the rest are grouped as Other, in grey).")
+    chart_columns = st.columns(2)
+    for i, (name, values) in enumerate(top_values.groupby("column_name", sort=False)):
+        values = values.sort_values("value_rank", ascending=False)  # biggest at the top, Other at the bottom
+        is_other = values["value_rank"] > 10
+        fig = go.Figure(go.Bar(
+            x=values["pct_of_rows"],
+            y=values["value"],
+            orientation="h",
+            marker=dict(color=[GREY if other else BLUE for other in is_other], cornerradius=4),
+            text=[f"{v:.1f}%" for v in values["pct_of_rows"]],
+            textposition="outside",
+            cliponaxis=False,
+            customdata=values["row_count"],
+            hovertemplate="<b>%{y}</b><br>%{x:.1f}% of rows (%{customdata:,})<extra></extra>",
+        ))
+        fig.update_layout(title_text=pretty(name), margin_r=60)
+        fig.update_yaxes(type="category")  # values like "0" / "1" are labels, not numbers
+        fig.update_xaxes(title_text="% of rows", range=[0, values["pct_of_rows"].max() * 1.15])
+        style(fig, height=30 * len(values) + 110, money_axis=None)
+        show(fig, chart_columns[i % 2])
+
+
+def correlation_chart(correlations: pd.DataFrame) -> None:
+    st.subheader("Strongest correlations")
+    st.caption("Pearson r between pairs of numeric columns: near +1 or −1 = they move together closely, near 0 = "
+               "no straight-line link. Blue = they rise together (+), orange = one rises as the other falls (−). "
+               "A link is not proof of cause.")
+    data = correlations.sort_values("pearson_r", key=abs)  # strongest at the top
+    data = data.assign(pair=data["column_a"] + " × " + data["column_b"],
+                       strength=data["pearson_r"].abs().map(lambda r: "strong" if r >= 0.6 else "moderate" if r >= 0.3 else "weak"))
+    fig = go.Figure(go.Bar(
+        x=data["pearson_r"], y=data["pair"], orientation="h",
+        marker=dict(color=[BLUE if r >= 0 else ORANGE for r in data["pearson_r"]], cornerradius=4),
+        text=[f"{r:+.2f}" for r in data["pearson_r"]], textposition="outside", cliponaxis=False,
+        customdata=data["strength"],
+        hovertemplate="<b>%{y}</b><br>r = %{x:+.2f} (%{customdata})<extra></extra>",
+    ))
+    fig.update_xaxes(title_text="Pearson r", range=[-1.15, 1.15], tickvals=[-1, -0.5, 0, 0.5, 1])
+    style(fig, height=34 * len(data) + 100, money_axis=None)
+    show(zero_line(fig))
+    with st.expander("Table view"):
+        st.dataframe(
+            data.sort_values("correlation_rank")[["column_a", "column_b", "pearson_r", "strength"]],
+            hide_index=True, width="stretch",
+            column_config={
+                "column_a": "Column A", "column_b": "Column B",
+                "pearson_r": st.column_config.NumberColumn("Pearson r", format="%.2f"),
+                "strength": "Strength",
+            },
+        )
+
+
+def group_charts(groups: pd.DataFrame) -> None:
+    st.subheader("Biggest group differences")
+    st.caption("The average of a numeric column in its highest and lowest group, next to the overall average "
+               "(groups of 30+ rows only). Strength 0 to 1 = how much of the spread the groups explain.")
+    chart_columns = st.columns(2)
+    for i, g in enumerate(groups.itertuples()):
+        labels = [f"Lowest: {g.lowest_group}", "Overall", f"Highest: {g.highest_group}"]
+        values = [g.lowest_mean, g.overall_mean, g.highest_mean]
+        rows = [g.lowest_rows, None, g.highest_rows]
+        fig = go.Figure(go.Bar(
+            x=values, y=labels, orientation="h",
+            marker=dict(color=[BLUE, GREY, BLUE], cornerradius=4),
+            text=[number(v) for v in values], textposition="outside", cliponaxis=False,
+            customdata=[f"{r:,} rows" if r else "all groups" for r in rows],
+            hovertemplate="<b>%{y}</b><br>Average: %{x:,.2f} (%{customdata})<extra></extra>",
+        ))
+        fig.update_layout(title_text=f"{pretty(g.numeric_column)} by {g.category_column.replace('_', ' ')} · strength {g.strength_eta_sq:.2f}",
+                          margin_r=60)
+        fig.update_yaxes(autorange="reversed")
+        fig.update_xaxes(title_text=f"Average {g.numeric_column.replace('_', ' ')}", range=[min(0, min(values)), max(values) * 1.2])
+        style(fig, height=230, money_axis=None)
+        show(fig, chart_columns[i % 2])
+    with st.expander("Table view"):
+        st.dataframe(
+            groups.assign(
+                highest=groups["highest_group"] + " (" + groups["highest_mean"].map(number) + ")",
+                lowest=groups["lowest_group"] + " (" + groups["lowest_mean"].map(number) + ")",
+                overall_mean=groups["overall_mean"].round(2),
+            )[["numeric_column", "category_column", "strength_eta_sq", "highest", "lowest", "overall_mean"]],
+            hide_index=True, width="stretch",
+            column_config={
+                "numeric_column": "Average of", "category_column": "By",
+                "strength_eta_sq": st.column_config.NumberColumn("Strength", format="%.2f"),
+                "highest": "Highest group", "lowest": "Lowest group",
+                "overall_mean": st.column_config.NumberColumn("Overall average", format="localized"),
+            },
+        )
+
+
+def trend_summary(periods: pd.DataFrame, grain: str) -> str:
+    """'7 Jan 2026 to 31 Aug 2026, per week: 35 weeks (2 partial). Rows 67 → 59 (−12%) from the first to the
+    last full week. 3 weeks with no rows.'"""
+    full = periods[~periods["is_partial"]]
+    text = (f"{len(periods)} {grain}s, the first starting {periods['period_start'].min():%d %b %Y} and the last "
+            f"{periods['period_start'].max():%d %b %Y}"
+            + (f" ({int(periods['is_partial'].sum())} partial)" if periods["is_partial"].any() else "") + ".")
+    if len(full) >= 2:
+        first, last = full.iloc[0]["row_count"], full.iloc[-1]["row_count"]
+        if first:
+            pct = 100 * (last - first) / first
+            trend = "flat" if abs(pct) < FLAT_PCT else f"{pct:+.0f}%"
+            text += f" Rows {first:,} → {last:,} ({trend}) from the first to the last full {grain}."
+    empty = int((periods["row_count"] == 0).sum())
+    text += f" {empty} {grain}{'s' if empty != 1 else ''} with no rows." if empty else " No gaps."
+    return text
+
+
+def trend_chart(points: pd.DataFrame, value: str, grain: str, title: str) -> go.Figure:
+    """A line over time. Partial periods (first / last) are hollow markers joined by a dashed line."""
+    full_values = points[value].where(~points["is_partial"])
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(  # dashed underneath, so only the partial ends show as dashed
+        x=points["period_start"], y=points[value], mode="lines", line=dict(color=BLUE, width=2, dash="dot"),
+        hoverinfo="skip", showlegend=False,
+    ))
+    fig.add_trace(go.Scatter(
+        x=points["period_start"], y=full_values, mode="lines+markers", line=dict(color=BLUE, width=2),
+        marker=dict(size=8, color=BLUE, line=dict(color="white", width=2)), showlegend=False,
+        hovertemplate=f"<b>{grain.capitalize()} of %{{x|%d %b %Y}}</b><br>{title}: %{{y:,.2f}}<extra></extra>",
+    ))
+    partial = points[points["is_partial"]]
+    if not partial.empty:
+        fig.add_trace(go.Scatter(
+            x=partial["period_start"], y=partial[value], mode="markers", showlegend=False,
+            marker=dict(size=9, color="white", line=dict(color=BLUE, width=2)),
+            hovertemplate=f"<b>{grain.capitalize()} of %{{x|%d %b %Y}}</b> (partial {grain})<br>{title}: %{{y:,.2f}}<extra></extra>",
+        ))
+    fig.update_yaxes(title_text=title, rangemode="tozero")
+    fig.update_xaxes(title_text="")
+    return style(fig, height=340, money_axis=None)
+
+
+def pattern_chart(pattern: pd.DataFrame, title: str) -> go.Figure:
+    fig = go.Figure(go.Bar(
+        x=pattern["bucket"], y=pattern["share_pct"], marker=dict(color=BLUE, cornerradius=4),
+        customdata=pattern["row_count"],
+        hovertemplate="<b>%{x}</b><br>%{y:.1f}% of rows (%{customdata:,})<extra></extra>",
+    ))
+    fig.update_layout(title_text=title)
+    fig.update_xaxes(type="category")
+    fig.update_yaxes(title_text="% of rows")
+    return style(fig, height=280, money_axis=None)
+
+
+def trends(series: pd.DataFrame, patterns: pd.DataFrame) -> None:
+    st.caption("Partial periods (the first or last, if the data only covers part of it) are drawn hollow with a dashed line. "
+               "Changes over time are differences in this file, not a forecast.")
+    pattern_titles = {"day_of_week": "Rows by weekday", "month_of_year": "Rows by month of the year", "hour_of_day": "Rows by hour of the day"}
+    for date_column, rows in series.groupby("date_column", sort=False):
+        grain = rows["grain"].iloc[0]
+        periods = rows.drop_duplicates("period_start").sort_values("period_start")
+        with st.container(border=True):
+            st.markdown(f"#### {pretty(date_column)}")
+            st.markdown(trend_summary(periods, grain))
+            measures = [m for m in rows["measure_name"].dropna().unique()]
+            choice = st.selectbox("Show", ["Rows"] + measures, key=f"trend_{date_column}",
+                                  format_func=lambda m: f"Rows per {grain}" if m == "Rows" else m.capitalize())
+            if choice == "Rows":
+                show(trend_chart(periods, "row_count", grain, "Rows"))
+            else:
+                points = rows[rows["measure_name"] == choice].sort_values("period_start")
+                show(trend_chart(points, "measure_value", grain, choice.capitalize()))
+            found = patterns[patterns["date_column"] == date_column] if not patterns.empty else patterns
+            kinds = [k for k in pattern_titles if not found.empty and (found["pattern_type"] == k).any()]
+            chart_columns = st.columns(len(kinds)) if kinds else []
+            for column, kind in zip(chart_columns, kinds):
+                pattern = found[found["pattern_type"] == kind].drop_duplicates("bucket_order").sort_values("bucket_order")
+                show(pattern_chart(pattern, pattern_titles[kind]), column)
+
+
+# ---------- the page ----------
+
+updated_slot = page_header(
+    "Auto insights",
+    "What's in a CSV, how complete is it, and what are its main patterns? An automatic first look at **any CSV**, "
+    "with a short AI-written report. Upload one below (password needed) and only you see the results, for 24 hours.",
 )
 upload_box()
 upload_status()
@@ -130,13 +417,20 @@ else:
     upload_id = EXAMPLE_ID
     st.markdown("#### Example (made-up café data)")
     st.caption("This is what a report looks like, using a made-up file of café sales. Upload your own CSV above to see yours.")
+updated_slot.caption(f":material/update: Data updated {upload['loaded_at']:%d %b %Y} (when this file was profiled)")
 
 profile = for_upload("column_profile", upload_id, "column_position")
+details = for_upload("column_details", upload_id, "column_name")
 top_values = for_upload("top_values", upload_id, "column_name, value_rank")
 correlations = for_upload("correlations", upload_id, "correlation_rank")
 groups = for_upload("group_insights", upload_id, "insight_rank")
 histograms = for_upload("histograms", upload_id, "column_name, bin_index")
+series = for_upload("time_series", upload_id, "date_column, period_start, measure_name")
+patterns = for_upload("time_patterns", upload_id, "date_column, pattern_type, bucket_order")
 reports = for_upload("ai_report", upload_id, "generated_at desc")
+if profile.empty:
+    st.error("The results for this upload couldn't be loaded. Try **Refresh data** in the sidebar.", icon=":material/error:")
+    footer()
 
 # headline numbers
 type_counts = profile["column_type"].value_counts()
@@ -147,11 +441,12 @@ col1.metric(
 )
 col2.metric(
     "Columns", f"{upload['column_count']}", border=True,
-    help=(f"Only the first {upload['profiled_column_count']} were profiled." if upload["profiled_column_count"] < upload["column_count"] else None),
+    help=(f"Only the first {upload['profiled_column_count']} were profiled." if upload["profiled_column_count"] < upload["column_count"] else "Every column was profiled."),
 )
 col3.metric(
-    "Numeric / category / date", f"{type_counts.get('numeric', 0)} / {type_counts.get('categorical', 0)} / {type_counts.get('date', 0)}",
-    border=True, help="How each column was classified automatically.",
+    "Numeric / category / date",
+    f"{type_counts.get('numeric', 0)} / {type_counts.get('categorical', 0) + type_counts.get('boolean', 0)} / {type_counts.get('date', 0)}",
+    border=True, help="How each column was classified automatically. Yes/no columns count as categories.",
 )
 col4.metric(
     "Average missing", f"{profile['null_pct'].mean():.1f}%", border=True,
@@ -160,128 +455,34 @@ col4.metric(
 if upload["is_sampled"]:
     st.caption(f"Big file: the numbers below come from a random sample of {upload['profiled_row_count']:,} rows.")
 
-# data quality
-st.subheader("Data quality")
-# min/median/max and the dates are often empty (they only apply to some column types). st.dataframe ignores
-# a Styler's na_rep and shows "None", so those columns become display text here, with "" for missing.
-# % missing and distinct values are never empty, so they stay numbers (and sort as numbers).
-def as_text(values, formatter=str):
-    return values.map(lambda v: "" if pd.isna(v) else formatter(v))
+# tabs, only those with something in them
+has_numeric = (profile["column_type"] == "numeric").any()
+has_categories = not top_values.empty
+tabs = {"Overview": True, "Columns": has_numeric or has_categories,
+        "Relationships": not correlations.empty or not groups.empty, "Trends over time": not series.empty}
+shown = [name for name, wanted in tabs.items() if wanted]
+tab = dict(zip(shown, st.tabs(shown)))
 
+with tab["Overview"]:
+    ai_report(reports)
+    data_quality(profile, details)
 
-st.dataframe(
-    profile.assign(
-        column=profile["column_name"],
-        kind=profile["column_type"].map(TYPE_LABELS),
-        min_value=as_text(profile["min_value"], number),
-        median_value=as_text(profile["median_value"], number),
-        max_value=as_text(profile["max_value"], number),
-        min_date=as_text(profile["min_date"]),
-        max_date=as_text(profile["max_date"]),
-    )[["column", "kind", "null_pct", "distinct_count", "min_value", "median_value", "max_value", "min_date", "max_date"]],
-    hide_index=True,
-    width="stretch",
-    column_config={
-        "column": "Column",
-        "kind": st.column_config.TextColumn("Type", help="ID / free text = nearly every value is unique, so it's left out of the charts and the AI report."),
-        "null_pct": st.column_config.NumberColumn("% missing", format="%.1f%%"),
-        "distinct_count": st.column_config.NumberColumn("Distinct values", format="localized"),
-        "min_value": st.column_config.TextColumn("Min", alignment="right"),
-        "median_value": st.column_config.TextColumn("Median", alignment="right"),
-        "max_value": st.column_config.TextColumn("Max", alignment="right"),
-        "min_date": "First date",
-        "max_date": "Last date",
-    },
-)
+if "Columns" in tab:
+    with tab["Columns"]:
+        if has_numeric:
+            numeric_columns(histograms, details)
+        if has_categories:
+            category_columns(top_values)
 
-# histograms for the numeric columns
-if not histograms.empty:
-    st.subheader("Numeric columns")
-    st.caption("How the values are spread: 20 equal-width bins per column.")
-    chart_columns = st.columns(2)
-    for i, (name, bins) in enumerate(histograms.groupby("column_name", sort=False)):
-        fig = go.Figure(go.Bar(
-            x=(bins["bin_start"] + bins["bin_end"]) / 2,
-            y=bins["row_count"],
-            width=bins["bin_end"] - bins["bin_start"],
-            marker=dict(color=BLUE, line=dict(width=1, color="white")),
-            customdata=bins[["bin_start", "bin_end"]],
-            hovertemplate="%{customdata[0]:,.2f} to %{customdata[1]:,.2f}<br>Rows: %{y:,}<extra></extra>",
-        ))
-        fig.update_layout(title_text=pretty(name), bargap=0)
-        fig.update_yaxes(title_text="Rows")
-        style(fig, height=300, money_axis=None)
-        chart_columns[i % 2].plotly_chart(fig, width="stretch")
+if "Relationships" in tab:
+    with tab["Relationships"]:
+        if not correlations.empty:
+            correlation_chart(correlations)
+        if not groups.empty:
+            group_charts(groups)
 
-# bar charts of the top values of each category column
-if not top_values.empty:
-    st.subheader("Category columns")
-    st.caption("Most common values, as a % of all rows (top 10 per column).")
-    chart_columns = st.columns(2)
-    for i, (name, values) in enumerate(top_values.groupby("column_name", sort=False)):
-        values = values.sort_values("value_rank", ascending=False)  # biggest at the top
-        fig = go.Figure(go.Bar(
-            x=values["pct_of_rows"],
-            y=values["value"],
-            orientation="h",
-            marker=dict(color=BLUE, cornerradius=4),
-            text=[f"{v:.1f}%" for v in values["pct_of_rows"]],
-            textposition="outside",
-            cliponaxis=False,
-            customdata=values["row_count"],
-            hovertemplate="<b>%{y}</b><br>%{x:.1f}% of rows (%{customdata:,})<extra></extra>",
-        ))
-        fig.update_layout(title_text=pretty(name), margin_r=60)
-        fig.update_xaxes(title_text="% of rows", range=[0, values["pct_of_rows"].max() * 1.15])
-        style(fig, height=30 * len(values) + 110, money_axis=None)
-        chart_columns[i % 2].plotly_chart(fig, width="stretch")
-
-# correlations and group differences
-if not correlations.empty:
-    st.subheader("Strongest correlations")
-    st.caption("Pearson r between pairs of numeric columns: near 1 or −1 = they move together closely, near 0 = no straight-line link. A link is not proof of cause.")
-    st.dataframe(
-        correlations.assign(strength=correlations["pearson_r"].abs().map(
-            lambda r: "strong" if r >= 0.6 else "moderate" if r >= 0.3 else "weak"))[["column_a", "column_b", "pearson_r", "strength"]],
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "column_a": "Column A", "column_b": "Column B",
-            "pearson_r": st.column_config.NumberColumn("Pearson r", format="%.2f"),
-            "strength": "Strength",
-        },
-    )
-
-if not groups.empty:
-    st.subheader("Biggest group differences")
-    st.caption("Average of a numeric column for each value of a category column (groups of 30+ rows only). "
-               "Strength 0 to 1 = how much of the spread the groups explain.")
-    st.dataframe(
-        groups.assign(
-            highest=groups["highest_group"] + " (" + groups["highest_mean"].map(number) + ")",
-            lowest=groups["lowest_group"] + " (" + groups["lowest_mean"].map(number) + ")",
-            overall_mean=groups["overall_mean"].round(2),
-        )[["numeric_column", "category_column", "strength_eta_sq", "highest", "lowest", "overall_mean"]],
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "numeric_column": "Average of", "category_column": "By",
-            "strength_eta_sq": st.column_config.NumberColumn("Strength", format="%.2f"),
-            "highest": "Highest group", "lowest": "Lowest group",
-            "overall_mean": st.column_config.NumberColumn("Overall average", format="localized"),
-        },
-    )
-
-# AI report
-st.subheader("AI report")
-if reports.empty:
-    st.info("No AI report for this upload.")
-else:
-    report = reports.iloc[0]
-    with st.container(border=True):
-        st.markdown(md_safe(report["report_text"]))
-    st.caption(f"Written by AI (`{report['model_endpoint']}`) on {report['generated_at']:%d %b %Y}, using only the facts below.")
-    with st.expander("Facts the AI was given"):
-        st.text(report["input_facts"])
+if "Trends over time" in tab:
+    with tab["Trends over time"]:
+        trends(series, patterns)
 
 footer()

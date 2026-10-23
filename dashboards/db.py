@@ -9,6 +9,7 @@ import streamlit as st
 from databricks import sql
 
 MARTS_SCHEMA = "workspace.marts"
+REPO_URL = "https://github.com/shaqran39/college-roi-analytics"
 
 # results are kept for 1 hour, so clicking around the dashboard doesn't wake the warehouse,
 # but new data from the Databricks Job shows up within the hour (or straight away with "Refresh data")
@@ -67,8 +68,43 @@ def refresh_button() -> None:
 
 
 def load_mart(table_name: str) -> pd.DataFrame:
-    """Load a whole mart table, e.g. load_mart("mart_roi_by_major")."""
-    return run_query(f"select * from {MARTS_SCHEMA}.{table_name}")
+    """Load a whole mart table, e.g. load_mart("mart_roi_by_major"). Stops the page with a friendly message if it fails."""
+    try:
+        return run_query(f"select * from {MARTS_SCHEMA}.{table_name}")
+    except Exception:
+        st.error(
+            "The numbers couldn't be loaded from Databricks just now. The warehouse may be waking up: "
+            "wait a minute, then press **Refresh data** in the sidebar.",
+            icon=":material/cloud_off:",
+        )
+        st.stop()
+
+
+def data_updated() -> str | None:
+    """When the marts were last rebuilt, e.g. '19 Oct 2026', or None if it can't be read."""
+    try:
+        found = run_query(
+            f"select max(last_altered) as updated from workspace.information_schema.tables "
+            f"where table_schema = :schema",
+            params={"schema": MARTS_SCHEMA.split(".")[1]},
+        )
+        updated = found.iloc[0]["updated"]
+        return None if pd.isna(updated) else f"{pd.Timestamp(updated):%d %b %Y}"
+    except Exception:
+        return None
+
+
+def page_header(title: str, question: str, updated: str | None = None):
+    """The same header on every page: title, what the page answers, then "Data updated <date>".
+
+    Returns the caption's slot, so a page that only knows its date later can fill it in then.
+    """
+    st.title(title)
+    st.markdown(question)
+    slot = st.empty()
+    if updated:
+        slot.caption(f":material/update: Data updated {updated}")
+    return slot
 
 
 def money(value: float) -> str:

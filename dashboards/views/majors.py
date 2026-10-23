@@ -3,20 +3,25 @@
 import plotly.graph_objects as go
 import streamlit as st
 
-from charts import BLUE, RED, style, zero_line
-from db import load_mart, md_safe, money, pretty
+from charts import BLUE, RED, is_phone, names_above_rows, show, style, zero_line
+from db import data_updated, load_mart, md_safe, money, page_header, pretty
 
 roi_by_major = load_mart("mart_roi_by_major").sort_values("median_net_roi_usd")
 report_cards = load_mart("mart_major_report_cards").set_index("major")
 roi_by_major["label"] = roi_by_major["major"].map(pretty)
 
-st.title("Majors")
-st.markdown(
-    "Typical (median) **10-year net return** for each major: extra earnings vs a high-school graduate, "
-    "minus the net cost of college. **Red** = the typical graduate was worse off than not going to college."
+page_header(
+    "Majors",
+    "Which majors paid off over 10 years, and by how much?",
+    data_updated(),
 )
 
 # ROI by major
+st.subheader("Typical net return by major")
+st.caption(
+    "Median **10-year net return**: extra earnings vs a high-school graduate, minus the net cost of college. "
+    "**Red** bars with a minus sign = the typical graduate was worse off than not going to college."
+)
 fig = go.Figure(go.Bar(
     x=roi_by_major["median_net_roi_usd"],
     y=roi_by_major["label"],
@@ -42,9 +47,13 @@ for _, row in roi_by_major[roi_by_major["median_net_roi_usd"] < 0].iterrows():
 # room on the right so the longest bar's label isn't cut off
 low, high = roi_by_major["median_net_roi_usd"].min(), roi_by_major["median_net_roi_usd"].max()
 fig.update_xaxes(title_text="Median 10-year net return (US$)", range=[min(low, 0) * 1.1, high * 1.05])
-style(fig, height=32 * len(roi_by_major) + 100)
+phone = is_phone()
+style(fig, height=(52 if phone else 32) * len(roi_by_major) + 100)
 fig.update_layout(margin_r=90)  # fixed space for the longest label, even on a phone
-st.plotly_chart(zero_line(fig), width="stretch")
+if phone:  # names above thinner bars, so the bars get the full width
+    names_above_rows(fig, roi_by_major["label"], gap=12)
+    fig.update_layout(bargap=0.55)
+show(zero_line(fig), st.container(border=True))
 
 with st.expander("Table view"):
     st.dataframe(
@@ -67,6 +76,7 @@ with st.expander("Table view"):
 
 # report card for one major
 st.subheader("Report card")
+st.caption("Pick a major for its key numbers and a short written verdict.")
 majors_best_first = roi_by_major.sort_values("median_net_roi_usd", ascending=False)["major"].tolist()
 major = st.selectbox("Pick a major", majors_best_first, format_func=pretty)
 card = report_cards.loc[major]
@@ -76,10 +86,14 @@ with st.container(border=True):
     st.markdown(f"#### {pretty(major)}")
     st.markdown(md_safe(card["verdict"]))
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Typical net return", money(stats["median_net_roi_usd"]))
-    col2.metric("Worse off than no college", f"{stats['pct_roi_negative']}%")
-    col3.metric("Median payback", f"{stats['median_payback_years']} yrs")
-    col4.metric("Debt ÷ yearly pay", f"{stats['median_debt_to_earnings_ratio']:.2f}")
+    col1.metric("Typical net return", money(stats["median_net_roi_usd"]), border=True,
+                help="Median 10-year net return of graduates in this major.")
+    col2.metric("Worse off than no college", f"{stats['pct_roi_negative']}%", border=True,
+                help="Share of graduates whose net return was below zero.")
+    col3.metric("Median payback", f"{stats['median_payback_years']} yrs", border=True,
+                help="Typical years until extra earnings covered the net cost of college.")
+    col4.metric("Debt ÷ yearly pay", f"{stats['median_debt_to_earnings_ratio']:.2f}", border=True,
+                help="Typical debt at graduation divided by typical yearly pay. Lower is easier to repay.")
     st.caption(f"Opening takeaway from fixed rules; the rest written by AI (`{card['model_endpoint']}`) from these numbers only.")
 
 with st.expander("All report cards"):

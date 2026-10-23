@@ -89,24 +89,36 @@ A second, separate path for **any CSV with any columns**. It never touches the c
 
 1. **Drop a CSV** into `/Volumes/workspace/raw/auto_landing/` (new file name each time).
 2. **The Job `auto_insights_refresh`** ([definition](orchestration/auto_insights_job.yml)) runs [`auto_insights/profile_upload.py`](auto_insights/profile_upload.py). It loads the newest CSV into `workspace.auto_insights.latest_upload`, cleans the column names (snake_case) and profiles the first 50 columns (a random 1M-row sample for bigger files).
-3. **Each column gets a type**: numeric, category, date, or ID / free text (nearly every value unique, left out of the charts and the AI).
+3. **Each column gets a type**, and the analysis adapts to it:
+   - **Numeric**, including numbers stored as text like `$1,200`, `1,200` or `45%` (the unit is kept: money or %). Plus skew (only for columns with 10+ different values), outliers (1.5 × IQR rule), and the share of zeros and negatives.
+   - **Yes / no**: yes/no, true/false or 0/1 columns, analysed like a category.
+   - **Category**: top 10 values plus an "Other" share, and a flag when one value is over 80%.
+   - **Date**: common formats, including Australian dd/mm/yyyy. If the first part is ever over 12 it's dd/mm, if the second is it's mm/dd, and if it can't tell it reads dd/mm and says so. Columns Databricks guesses are dates are re-read as text first, so these rules always apply.
+   - **ID / free text**: nearly every value unique, left out of the charts and the AI. Whole numbers only count as an ID if the name says so (`id`, `code`, `number`...) or they run 1, 2, 3..., so amounts like incomes aren't skipped.
+
+   The converted columns go into the scratch table `typed_upload`. **Each analysis only runs when it applies**: correlations need 2+ numeric columns, group differences a category and a numeric column, trends a date column.
 4. **Results are written to `workspace.auto_insights`**, tagged with an `upload_id` (time + file name, which includes a random part for uploads from the app):
 
    | Table | What's in it |
    |---|---|
    | `uploads` | One row per finished upload: file, rows, columns, sampled or not |
    | `column_profile` | Type, % missing, distinct count, min / quartiles / median / mean / max, date range |
-   | `top_values` | Top 10 values of each category column (50 or fewer distinct values) |
+   | `column_details` | Unit, date format (and a note if day/month was ambiguous), skew, outliers, % zeros / negatives, top value share |
+   | `top_values` | Top 10 values of each category and yes/no column, plus an "Other" row for the rest |
    | `correlations` | Top 10 Pearson correlations between numeric columns |
    | `group_insights` | Biggest differences in a numeric column's average across a category's groups (groups of 30+ rows) |
    | `histograms` | 20 bins for up to 6 numeric columns, for the charts |
-   | `ai_report` | ONE `ai_query` report per upload (about 200 words) and the exact `input_facts` it was given |
-5. **The dashboard's "Auto insights" page is private per upload.** Everyone sees an **Example** (made-up café data) by default. After you upload a CSV (password needed), that browser session shows only *your* results, plus a private link (`?report=<id>`) you can share. The id contains 22 random characters, so it can't be guessed, and the link works for 24 hours. There is no list of uploads, so nobody can browse anyone else's. A wrong or expired link shows a friendly message and the Example.
-6. **24-hour retention.** After each successful run, the clean-up deletes the CSV it just profiled, any other CSV in `auto_landing` older than 1 hour (an upload that never got profiled), and every upload's rows in `workspace.auto_insights` once they're more than 24 hours old. The Example (`upload_id = 'example'`) is never deleted. A clean-up problem only logs a warning; the new profile is already saved. To see what it would delete without deleting anything: `python auto_insights/profile_upload.py --cleanup-dry-run`.
-7. **The Example** was created once with `python auto_insights/profile_upload.py --as-example data/raw/cafe_sales_test.csv`. Its CSV is kept in the volume `workspace.auto_insights.example_data` (not `auto_landing`, so it doesn't start the Job). Running it again does nothing if the Example already exists.
+   | `time_series` | For up to 2 date columns: rows per day, week or month (chosen from the span, at most ~200 points), plus up to 3 numeric columns: money totals like revenue first, then the most complete ones. Each one is either summed (amounts that add up: revenue, sales, amount, cost, qty, count) or averaged (prices, rates, %, scores, ages, and anything else), never both. Empty periods are kept, and partial first / last periods are marked |
+   | `time_patterns` | Rows (and means) by weekday, by month of the year (if the data spans 12+ months) and by hour (if there are real times) |
+   | `ai_report` | ONE `ai_query` report per upload (about 250 words) and the exact `input_facts` it was given |
 
-The AI follows the same rules as above: only the numbers it's given, no invented causes, correlation isn't causation, Australian spelling.
-To test from a laptop: `python auto_insights/profile_upload.py` (uses the same env vars as dbt).
+   The AI report adapts too. Its sections are What the data is, Data quality, Key insights, **Trends over time** (only when there's a date column) and Worth checking next, and the facts only include what the file has.
+5. **The dashboard's "Auto insights" page is private per upload, and only shows what applies.** Tabs appear only when they have content: **Overview** (the AI report, then a Data quality table with % missing bars and units), **Columns** (histograms and top-value charts), **Relationships** (correlation and group-difference charts, each with a table view) and **Trends over time** (a line per date column with partial periods marked, a Rows / sum / mean selector, and weekday / month / hour charts). Everyone sees an **Example** (made-up café data) by default. After you upload a CSV (password needed), that browser session shows only *your* results, plus a private link (`?report=<id>`) you can share. The id contains 22 random characters, so it can't be guessed, and the link works for 24 hours. There is no list of uploads, so nobody can browse anyone else's. A wrong or expired link shows a friendly message and the Example.
+6. **24-hour retention.** After each successful run, the clean-up deletes the CSV it just profiled, any other CSV in `auto_landing` older than 1 hour (an upload that never got profiled), and every upload's rows in `workspace.auto_insights` once they're more than 24 hours old. The Example (`upload_id = 'example'`) is never deleted. A clean-up problem only logs a warning; the new profile is already saved. To see what it would delete without deleting anything: `python auto_insights/profile_upload.py --cleanup-dry-run`.
+7. **The Example** was created once with `python auto_insights/profile_upload.py --as-example data/raw/cafe_sales_test.csv`. Its CSV is kept in the volume `workspace.auto_insights.example_data` (not `auto_landing`, so it doesn't start the Job). Running it again does nothing if the Example already exists. After the profiler changes, `python auto_insights/profile_upload.py --refresh-example` re-profiles it: it deletes **only** the rows where `upload_id = 'example'` (after checking its CSV can still be read) and writes them again.
+
+The AI follows the same rules as above: only the numbers it's given, no invented causes, no forecasts, correlation isn't causation, Australian spelling.
+To test from a laptop without starting the Job: `python auto_insights/profile_upload.py --test-file data/raw/my_file.csv` (uses the same env vars as dbt). It copies the CSV to the volume `workspace.auto_insights.test_data` under an upload-style name, profiles it, and prints its private link. Its results are removed by the normal 24-hour clean-up.
 
 ⚠️ **Uploads are private, but anyone you give the link to can see them for 24 hours, and the data is processed in Databricks.** Still only use public or synthetic data, never anything personal or sensitive.
 
@@ -117,7 +129,7 @@ To test from a laptop: `python auto_insights/profile_upload.py` (uses the same e
 | Transformation + tests | dbt Core (`dbt-databricks`) |
 | AI in the pipeline | Databricks `ai_query` with Llama 3.3 70B |
 | Orchestration | Databricks Jobs (file arrival trigger) |
-| Dashboard | Streamlit + Plotly on Streamlit Community Cloud (public link) |
+| Dashboard | Streamlit + Plotly on Streamlit Community Cloud (public link). One theme with light and dark colours (`dashboards/.streamlit/config.toml`), one shared chart style (`dashboards/charts.py`, colour-blind-checked colours, never colour alone), and the same header on every page |
 | AI pair-engineer | Claude Code |
 | Code | GitHub |
 
@@ -129,6 +141,8 @@ To test from a laptop: `python auto_insights/profile_upload.py` (uses the same e
   - It also wrote awkward phrases like "losses… a gain", so money sentences are now pre-written in SQL.
   - The headline label on each report card comes from fixed SQL rules, so the AI can't overstate it.
   - The fact sheet the AI saw is stored next to its answer, so every number can be checked.
+- **Don't let the database guess date formats.** Databricks read `07/01/2026` as a date on its own, which happens to work when some days are over 12, but would silently pick a format when every day is 12 or less. Auto insights now reads guessed dates as text and applies its own dd/mm rule, with a note when it can't tell.
+- **"Nearly every value is unique" isn't enough to call a column an ID.** An income column (whole dollars, almost all different) was skipped as an ID. It now also needs an ID-like name or values that run 1, 2, 3...
 - **Keep secrets out of Git from day one.**
   - The Databricks token lives in environment variables (for dbt) and in Streamlit secrets (for the dashboard).
   - `secrets.toml` is gitignored before it's ever filled in, and only a blank `secrets.toml.example` is committed.
