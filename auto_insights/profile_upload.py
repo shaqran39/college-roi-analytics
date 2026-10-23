@@ -8,6 +8,11 @@ or from a laptop for testing:
     python auto_insights/profile_upload.py --setup-only  # just create the schema, volume and tables
     python auto_insights/profile_upload.py --cleanup-dry-run  # show what the clean-up WOULD delete, delete nothing
     python auto_insights/profile_upload.py --as-example data/raw/cafe_sales_test.csv  # create the pinned Example (once)
+    python auto_insights/profile_upload.py --test-file data/raw/test_mixed.csv  # profile a local CSV without the Job
+
+The analysis adapts to the columns: text like "$1,200", "45%", "yes"/"no" or dd/mm/yyyy is read as a
+number, boolean or date first (into typed_upload), and each analysis only runs when it applies
+(correlations need 2+ numeric columns, group differences a category and a numeric column, trends a date).
 
 All work is SQL sent through run_sql(). In the Job it uses spark.sql; on a laptop it uses
 databricks-sql-connector with the env vars DATABRICKS_HOST, DATABRICKS_HTTP_PATH, DATABRICKS_TOKEN.
@@ -27,6 +32,7 @@ This is the ONLY code in the project allowed to delete.
 import argparse
 import os
 import re
+import secrets
 from datetime import datetime, timedelta, timezone
 
 LANDING_PATH = "/Volumes/workspace/raw/auto_landing/"
@@ -39,18 +45,49 @@ LEFTOVER_CSV_HOURS = 1      # a CSV still in auto_landing after this long was ne
 EXAMPLE_ID = "example"      # the pinned Example everyone sees by default; the clean-up never deletes it
 EXAMPLE_VOLUME = "workspace.auto_insights.example_data"     # NOT auto_landing, so it doesn't start the Job
 EXAMPLE_PATH = "/Volumes/workspace/auto_insights/example_data/"
+TEST_VOLUME = "workspace.auto_insights.test_data"           # --test-file: also NOT auto_landing
+TEST_PATH = "/Volumes/workspace/auto_insights/test_data/"
 
 MAX_COLUMNS = 50            # profile at most the first 50 columns
 MAX_ROWS = 1_000_000        # bigger files are profiled on a random sample of this many rows
 TOP_VALUES_MAX_DISTINCT = 50
+TOP_VALUES_SHOWN = 10       # top 10 values per category column, plus an "Other" row for the rest
+DOMINANT_PCT = 80           # one value over 80% of a column "dominates" it
 MIN_GROUP_ROWS = 30         # groups smaller than this are ignored in group_insights
 ID_DISTINCT_SHARE = 0.95    # "nearly every value is unique" -> id / free text
-DATE_PARSE_SHARE = 0.90     # a text column where 90%+ of values read as dates is a date
+PARSE_SHARE = 0.90          # a text column where 90%+ of values read as numbers (or dates) is numeric (or a date)
 HISTOGRAM_COLUMNS = 6
 HISTOGRAM_BINS = 20
+SKEW_THRESHOLD = 0.5        # skewness beyond +/-0.5 = a long tail on one side
+OUTLIER_IQR = 1.5           # outlier = more than 1.5 x IQR below p25 or above p75
+
+TIME_COLUMNS = 2            # analyse at most 2 date columns (the most complete ones)
+TIME_MEASURES = 3           # per period: sum and mean of the 3 most complete numeric columns
+MAX_PERIODS = 200
+FLAT_PCT = 5                # a change under 5% either way is "flat"
 
 NUMERIC_TYPES = ("tinyint", "smallint", "int", "bigint", "float", "double", "decimal")
 WHOLE_NUMBER_TYPES = ("tinyint", "smallint", "int", "bigint")
+
+# text numbers: strip these before reading the value ("$1,200" -> 1200, "45%" -> 45)
+NUMBER_STRIP = "[$€£,% ]"
+CURRENCY_SIGNS = ("$", "€", "£")
+# yes/no style columns become boolean (analysed like a category)
+BOOLEAN_PAIRS = [{"yes", "no"}, {"y", "n"}, {"true", "false"}, {"t", "f"}, {"0", "1"}]
+# date formats tried on text columns, as families. dmy and mdy both read "05/03/2026": when both read
+# every value, dd/mm wins (Australian default) and the column gets a note.
+DATE_FAMILIES = {
+    "iso": [],  # try_to_timestamp / try_to_date without a format (yyyy-mm-dd, with or without a time)
+    "dd/mm/yyyy": [f"d{s}M{s}yyyy{t}" for s in "/-." for t in ("", " H:mm", " H:mm:ss")],
+    "mm/dd/yyyy": [f"M{s}d{s}yyyy{t}" for s in "/-." for t in ("", " H:mm", " H:mm:ss")],
+    "yyyy/mm/dd": [f"yyyy/M/d{t}" for t in ("", " H:mm", " H:mm:ss")],
+    "d mmm yyyy": ["d MMM yyyy", "d MMMM yyyy", "MMM d, yyyy", "MMMM d, yyyy"],
+}
+# time grains, smallest first: (name for date_trunc, step for sequence(), roughly how many days per step)
+GRAINS = [("day", "1 day", 1), ("week", "1 week", 7), ("month", "1 month", 30.44),
+          ("quarter", "3 month", 91.31), ("year", "1 year", 365.25)]
+WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 # every append table, with explicit column types so each run's rows line up
 TABLES = {
@@ -89,6 +126,22 @@ TABLES = {
     "ai_report": {
         "upload_id": "string", "input_facts": "string", "report_text": "string",
         "model_endpoint": "string", "generated_at": "timestamp",
+    },
+    # extra per-column detail, in its own table so column_profile keeps its old shape
+    "column_details": {
+        "upload_id": "string", "column_name": "string", "unit": "string", "date_format": "string",
+        "date_note": "string", "skewness": "double", "skew_direction": "string",
+        "outlier_count": "bigint", "outlier_pct": "double", "zero_pct": "double", "negative_pct": "double",
+        "top_value_pct": "double", "is_dominated": "boolean",
+    },
+    "time_series": {
+        "upload_id": "string", "date_column": "string", "grain": "string", "period_start": "timestamp",
+        "is_partial": "boolean", "row_count": "bigint", "measure_name": "string", "measure_value": "double",
+    },
+    "time_patterns": {
+        "upload_id": "string", "date_column": "string", "pattern_type": "string", "bucket": "string",
+        "bucket_order": "int", "row_count": "bigint", "share_pct": "double",
+        "measure_name": "string", "measure_value": "double",
     },
 }
 
@@ -164,7 +217,8 @@ def insert_rows(table: str, rows: list[dict], chunk_size: int = 200) -> None:
                 params[key] = row.get(column)
                 placeholders.append(f"cast(:{key} as {column_type})")
             value_lists.append("(" + ", ".join(placeholders) + ")")
-        run_sql(f"insert into {SCHEMA}.{table} values " + ",\n".join(value_lists), params)
+        # columns named explicitly, so the insert still lines up if a table ever gains a column
+        run_sql(f"insert into {SCHEMA}.{table} ({', '.join(columns)}) values " + ",\n".join(value_lists), params)
 
 
 def to_float(value) -> float | None:
@@ -251,6 +305,14 @@ def load_latest(file_path: str) -> list[dict]:
     if not raw_columns:
         raise RuntimeError(f"{file_path} has no columns. Is it empty?")
 
+    # columns Databricks guessed are dates are read as text instead, so detect_types reads them with our
+    # rules (dd/mm unless the data says mm/dd, and a note when it can't tell) rather than a silent guess
+    guessed_dates = [row["col_name"] for row in raw_columns if row["data_type"].lower().startswith(("date", "timestamp"))]
+    if guessed_dates:
+        hints = ", ".join(f"{quote_ident(name)} STRING" for name in guessed_dates)
+        source = f"read_files({sql_literal(file_path)}, format => 'csv', header => true, schemaHints => {sql_literal(hints)})"
+        raw_columns = [row for row in run_sql(f"describe query select * from {source}") if row["col_name"] != "_rescued_data"]
+
     names = clean_names([row["col_name"] for row in raw_columns])
     select_list = ", ".join(f"{quote_ident(row['col_name'])} as {quote_ident(name)}" for row, name in zip(raw_columns, names))
     run_sql(f"create or replace table {SCHEMA}.latest_upload as select {select_list} from {source}")
@@ -260,37 +322,114 @@ def load_latest(file_path: str) -> list[dict]:
     ]
 
 
-# ---------- profile ----------
+# ---------- detect types ----------
 
 def is_numeric(source_type: str) -> bool:
     return source_type.startswith(NUMERIC_TYPES)
 
 
-def profile_columns(table: str, columns: list[dict], row_count: int) -> None:
-    """One aggregate query for all profiled columns; fills in stats and column_type on each dict."""
+def name_unit(original_name: str) -> str | None:
+    """A unit from the column name: 'Unit Price ($)' -> 'currency', 'Discount %' -> 'percent'."""
+    lower = original_name.lower()
+    if any(sign in lower for sign in CURRENCY_SIGNS) or re.search(r"(^|[^a-z])(usd|aud|eur|gbp)([^a-z]|$)", lower):
+        return "currency"
+    if "%" in lower or re.search(r"(^|[^a-z])(pct|percent|percentage)([^a-z]|$)", lower):
+        return "percent"
+    return None
+
+
+def date_family_expr(col: str, family: str) -> str:
+    """A timestamp expression that reads col with any format of one DATE_FAMILIES family (null if none fits)."""
+    if family == "iso":
+        return f"coalesce(try_to_timestamp({col}), cast(try_to_date({col}) as timestamp))"
+    return "coalesce(" + ", ".join(f"try_to_timestamp({col}, '{fmt}')" for fmt in DATE_FAMILIES[family]) + ")"
+
+
+def detect_types(table: str, columns: list[dict]) -> None:
+    """Decide how each column should be read, in ONE aggregate query. Sets on each dict:
+
+    stat_type   the type it's analysed as: 'double', 'timestamp', 'boolean' or the type read from the CSV
+    typed_sql   the expression that converts it ("$1,200" -> 1200.0, "25/12/2026" -> a timestamp, "Yes" -> 'yes')
+    unit, date_format, date_note   for the page and the AI facts
+    """
     expressions = []
     for i, column in enumerate(columns):
         col, kind = quote_ident(column["column_name"]), column["source_type"]
+        if kind == "string":
+            text = f"nullif(lower(trim({col})), '')"
+            expressions += [
+                f"count({text}) as nn_{i}",
+                f"case when count(distinct {text}) <= 2 then array_sort(collect_set({text})) end as set_{i}",
+                f"count(try_cast(regexp_replace({col}, '{NUMBER_STRIP}', '') as double)) as num_{i}",
+                f"count_if({col} rlike '[$€£]') as cur_{i}",
+                f"count_if(contains({col}, '%')) as pct_{i}",
+            ]
+            expressions += [f"count({date_family_expr(col, family)}) as d{f}_{i}" for f, family in enumerate(DATE_FAMILIES)]
+        elif kind.startswith(WHOLE_NUMBER_TYPES):
+            expressions.append(
+                f"case when count(distinct {col}) <= 2 then array_sort(collect_set(cast({col} as string))) end as set_{i}"
+            )
+    found = run_sql(f"select {', '.join(expressions)} from {table}")[0] if expressions else {}
+
+    for i, column in enumerate(columns):
+        col, kind = quote_ident(column["column_name"]), column["source_type"]
+        column.update(stat_type=kind, typed_sql=col, unit=None, date_format=None, date_note=None)
+        found_set = found.get(f"set_{i}")  # a list from Spark, a numpy array from the connector
+        values = set() if found_set is None else set(found_set)
+        if kind == "boolean" or (len(values) == 2 and any(values <= pair for pair in BOOLEAN_PAIRS)):
+            column.update(stat_type="boolean", typed_sql=f"nullif(lower(trim(cast({col} as string))), '')")
+        elif kind == "string" and found[f"nn_{i}"]:
+            non_empty = found[f"nn_{i}"]
+            date_counts = {family: found[f"d{f}_{i}"] for f, family in enumerate(DATE_FAMILIES)}
+            best_family = max(date_counts, key=date_counts.get)  # ties go to the first family listed (dd/mm before mm/dd)
+            if found[f"num_{i}"] / non_empty >= PARSE_SHARE:
+                unit = ("currency" if found[f"cur_{i}"] > non_empty / 2 else
+                        "percent" if found[f"pct_{i}"] > non_empty / 2 else name_unit(column["original_name"]))
+                column.update(
+                    stat_type="double", unit=unit,
+                    typed_sql=f"try_cast(regexp_replace({col}, '{NUMBER_STRIP}', '') as double)",
+                )
+            elif date_counts[best_family] / non_empty >= PARSE_SHARE:
+                column.update(
+                    stat_type="timestamp", typed_sql=date_family_expr(col, best_family),
+                    date_format="yyyy-mm-dd" if best_family == "iso" else best_family,
+                )
+                if best_family == "dd/mm/yyyy" and date_counts["mm/dd/yyyy"] == date_counts["dd/mm/yyyy"]:
+                    column["date_note"] = "ambiguous day/month: read as dd/mm"
+        elif is_numeric(kind):
+            column["unit"] = name_unit(column["original_name"])
+        elif kind.startswith(("date", "timestamp")):
+            column.update(stat_type="timestamp", typed_sql=f"cast({col} as timestamp)")
+
+
+def build_typed(columns: list[dict]) -> None:
+    """typed_upload = latest_upload with every column converted as detect_types decided (scratch table, no upload_id)."""
+    select_list = ", ".join(f"{c['typed_sql']} as {quote_ident(c['column_name'])}" for c in columns)
+    run_sql(f"create or replace table {SCHEMA}.typed_upload as select {select_list} from {SCHEMA}.latest_upload")
+
+
+# ---------- profile ----------
+
+def profile_columns(table: str, columns: list[dict], row_count: int) -> None:
+    """One aggregate query for all profiled columns (plus one for outliers); fills in stats and column_type."""
+    expressions = []
+    for i, column in enumerate(columns):
+        col, kind = quote_ident(column["column_name"]), column["stat_type"]
         expressions += [f"count({col}) as nn_{i}", f"count(distinct {col}) as nd_{i}"]
         if is_numeric(kind):
             value = f"cast({col} as double)"
             expressions += [
                 f"min({value}) as min_{i}", f"max({value}) as max_{i}", f"avg({value}) as mean_{i}",
                 f"percentile_approx({value}, 0.25) as p25_{i}", f"percentile_approx({value}, 0.5) as med_{i}",
-                f"percentile_approx({value}, 0.75) as p75_{i}",
+                f"percentile_approx({value}, 0.75) as p75_{i}", f"skewness({value}) as sk_{i}",
+                f"count_if({value} = 0) as zero_{i}", f"count_if({value} < 0) as neg_{i}",
             ]
-        elif kind.startswith(("date", "timestamp")):
+        elif kind == "timestamp":
             expressions += [f"cast(min({col}) as string) as dmin_{i}", f"cast(max({col}) as string) as dmax_{i}"]
-        elif kind == "string":
-            as_date = f"coalesce(try_to_timestamp({col}), cast(try_to_date({col}) as timestamp))"
-            expressions += [
-                f"count({as_date}) as dates_{i}",
-                f"cast(min({as_date}) as string) as dmin_{i}", f"cast(max({as_date}) as string) as dmax_{i}",
-            ]
     stats = run_sql(f"select {', '.join(expressions)} from {table}")[0]
 
     for i, column in enumerate(columns):
-        kind = column["source_type"]
+        kind = column["stat_type"]
         non_null, distinct = int(stats[f"nn_{i}"]), int(stats[f"nd_{i}"])
         column.update(
             non_null_count=non_null,
@@ -299,26 +438,58 @@ def profile_columns(table: str, columns: list[dict], row_count: int) -> None:
         )
         nearly_unique = non_null > 0 and distinct > TOP_VALUES_MAX_DISTINCT and distinct / non_null >= ID_DISTINCT_SHARE
 
-        if is_numeric(kind):
+        if kind == "boolean":
+            column["column_type"] = "boolean"
+        elif is_numeric(kind):
+            skewness = to_float(stats[f"sk_{i}"])
             column.update(
                 min_value=to_float(stats[f"min_{i}"]), max_value=to_float(stats[f"max_{i}"]),
                 mean_value=to_float(stats[f"mean_{i}"]), median_value=to_float(stats[f"med_{i}"]),
                 p25_value=to_float(stats[f"p25_{i}"]), p75_value=to_float(stats[f"p75_{i}"]),
+                skewness=None if skewness is None else round(skewness, 4),
+                skew_direction=(None if skewness is None else "right (long tail of high values)" if skewness > SKEW_THRESHOLD
+                                else "left (long tail of low values)" if skewness < -SKEW_THRESHOLD else "roughly symmetric"),
+                zero_pct=round(100 * stats[f"zero_{i}"] / non_null, 2) if non_null else None,
+                negative_pct=round(100 * stats[f"neg_{i}"] / non_null, 2) if non_null else None,
             )
-            column["column_type"] = "id_text" if nearly_unique and kind.startswith(WHOLE_NUMBER_TYPES) else "numeric"
-        elif kind.startswith(("date", "timestamp")):
-            column.update(min_date=stats[f"dmin_{i}"], max_date=stats[f"dmax_{i}"], column_type="date")
-        elif kind == "string" and non_null and int(stats[f"dates_{i}"]) / non_null >= DATE_PARSE_SHARE:
-            column.update(min_date=stats[f"dmin_{i}"], max_date=stats[f"dmax_{i}"], column_type="date")
+            # whole numbers that are nearly all different are an ID only if the name says so or they run
+            # 1, 2, 3...; otherwise it's a real amount (an income or a price is nearly unique too)
+            looks_like_id = nearly_unique and kind.startswith(WHOLE_NUMBER_TYPES) and (
+                re.search(r"(^|_)(id|key|code|no|num|number|ref)($|_)", column["column_name"]) is not None
+                or column["max_value"] - column["min_value"] + 1 <= 2 * distinct
+            )
+            column["column_type"] = "id_text" if looks_like_id else "numeric"
+        elif kind == "timestamp":
+            # "2026-05-08 00:00:00" -> "2026-05-08" when there's no time of day
+            column.update(
+                min_date=(stats[f"dmin_{i}"] or "").removesuffix(" 00:00:00") or None,
+                max_date=(stats[f"dmax_{i}"] or "").removesuffix(" 00:00:00") or None,
+                column_type="date",
+            )
         elif nearly_unique:
             column["column_type"] = "id_text"
         else:
             column["column_type"] = "categorical"
 
+    # outliers need p25 and p75 first: values more than 1.5 x IQR outside them
+    numerics = [(i, c) for i, c in enumerate(columns) if c["column_type"] == "numeric" and c["p25_value"] is not None]
+    if numerics:
+        expressions = []
+        for i, c in numerics:
+            iqr = c["p75_value"] - c["p25_value"]
+            low, high = c["p25_value"] - OUTLIER_IQR * iqr, c["p75_value"] + OUTLIER_IQR * iqr
+            value = f"cast({quote_ident(c['column_name'])} as double)"
+            expressions.append(f"count_if({value} < {low!r} or {value} > {high!r}) as out_{i}")
+        outliers = run_sql(f"select {', '.join(expressions)} from {table}")[0]
+        for i, c in numerics:
+            c["outlier_count"] = int(outliers[f"out_{i}"])
+            c["outlier_pct"] = round(100 * c["outlier_count"] / c["non_null_count"], 2)
+
 
 def top_values(table: str, categoricals: list[dict], row_count: int) -> list[dict]:
-    """Top 10 values (with count and % of rows) of each categorical with 50 or fewer distinct values."""
-    chosen = [c for c in categoricals if c["distinct_count"] <= TOP_VALUES_MAX_DISTINCT]
+    """Top 10 values (with count and % of rows) of each category / boolean column, plus an "Other" row
+    for the rest when there are more than 10. Also sets top_value_pct and is_dominated on each column."""
+    chosen = [c for c in categoricals if c["non_null_count"]]
     if not chosen:
         return []
     parts = [
@@ -328,15 +499,28 @@ def top_values(table: str, categoricals: list[dict], row_count: int) -> list[dic
     ]
     rows = run_sql(
         "select col_index, value, n, row_number() over (partition by col_index order by n desc, value) as value_rank "
-        f"from ({' union all '.join(parts)}) qualify value_rank <= 10"
+        f"from ({' union all '.join(parts)}) qualify value_rank <= {TOP_VALUES_SHOWN}"
     )
-    return [
+    result = [
         {
             "column_name": chosen[row["col_index"]]["column_name"], "value_rank": int(row["value_rank"]),
             "value": row["value"], "row_count": int(row["n"]), "pct_of_rows": round(100 * row["n"] / row_count, 2),
         }
         for row in rows
     ]
+    for c in chosen:
+        shown = [r for r in result if r["column_name"] == c["column_name"]]
+        top = max(shown, key=lambda r: r["row_count"])
+        c["top_value_pct"] = round(100 * top["row_count"] / c["non_null_count"], 2)
+        c["is_dominated"] = c["top_value_pct"] > DOMINANT_PCT
+        other = c["non_null_count"] - sum(r["row_count"] for r in shown)
+        if c["distinct_count"] > TOP_VALUES_SHOWN and other > 0:
+            result.append({
+                "column_name": c["column_name"], "value_rank": TOP_VALUES_SHOWN + 1,
+                "value": f"Other ({c['distinct_count'] - TOP_VALUES_SHOWN:,} more values)",
+                "row_count": other, "pct_of_rows": round(100 * other / row_count, 2),
+            })
+    return result
 
 
 def correlations(table: str, numerics: list[dict]) -> list[dict]:
@@ -426,6 +610,141 @@ def histograms(table: str, numerics: list[dict]) -> list[dict]:
             "bin_start": n["min_value"] + (b - 1) * width, "bin_end": n["min_value"] + b * width,
         })
     return result
+
+
+# ---------- time analysis ----------
+
+def choose_grain(span_days: float) -> tuple[str, str]:
+    """(grain, sequence step): day up to ~90 days, week up to ~2 years, else month; coarser if still over 200 points."""
+    start = 0 if span_days <= 90 else 1 if span_days <= 730 else 2
+    for grain, step, days_per_step in GRAINS[start:]:
+        if span_days / days_per_step + 1 <= MAX_PERIODS:
+            return grain, step
+    return GRAINS[-1][0], GRAINS[-1][1]
+
+
+def period_label(start: datetime, grain: str) -> str:
+    """How a period is named in the facts: 'week of 2026-03-02', 'Mar 2026', 'Q1 2026'."""
+    if grain == "day":
+        return f"{start:%Y-%m-%d}"
+    if grain == "week":
+        return f"week of {start:%Y-%m-%d}"
+    if grain == "month":
+        return f"{start:%b %Y}"
+    if grain == "quarter":
+        return f"Q{(start.month - 1) // 3 + 1} {start:%Y}"
+    return f"{start:%Y}"
+
+
+def change(first: float | None, last: float | None) -> dict:
+    """% change from first to last; 'flat' if under FLAT_PCT either way. No % if first is 0 or missing."""
+    if first is None or last is None or first == 0:
+        return {"first": first, "last": last, "pct": None, "direction": None}
+    pct = 100 * (last - first) / abs(first)
+    return {"first": first, "last": last, "pct": round(pct, 1),
+            "direction": "flat" if abs(pct) < FLAT_PCT else "up" if pct > 0 else "down"}
+
+
+def busiest_and_quietest(buckets: list[tuple[str, int]]) -> dict | None:
+    """{'busiest': (label, rows), 'quietest': (label, rows)} over buckets that aren't all equal."""
+    if len(buckets) < 2:
+        return None
+    return {"busiest": max(buckets, key=lambda b: b[1]), "quietest": min(buckets, key=lambda b: b[1])}
+
+
+def time_analysis(table: str, date_column: dict, measures: list[dict]) -> tuple[list[dict], list[dict], dict]:
+    """Rows per period (plus sum and mean of up to 3 measures) and day / month / hour patterns for one date column.
+
+    Returns (time_series rows, time_patterns rows, facts for the AI). Empty periods are kept (0 rows) and
+    the first / last period is marked partial when the data doesn't cover all of it.
+    """
+    name = date_column["column_name"]
+    col = quote_ident(name)
+    values = [quote_ident(m["column_name"]) for m in measures]
+    bounds = run_sql(
+        f"select min({col}) as lo, max({col}) as hi, count({col}) as n, "
+        f"count_if(hour({col}) <> 0 or minute({col}) <> 0 or second({col}) <> 0) as timed from {table}"
+    )[0]
+    lo, hi = bounds["lo"], bounds["hi"]
+    span_days = (hi - lo).total_seconds() / 86400
+    grain, step = choose_grain(span_days)
+
+    measure_sql = "".join(f", sum(cast({v} as double)) as s_{j}, avg(cast({v} as double)) as a_{j}" for j, v in enumerate(values))
+    measure_out = "".join(f", d.s_{j}, d.a_{j}" for j in range(len(values)))
+    periods = run_sql(
+        f"with bounds as (select min({col}) as lo, max({col}) as hi from {table}), "
+        f"periods as (select explode(sequence(date_trunc('{grain}', lo), date_trunc('{grain}', hi), interval {step})) "
+        f"as period_start from bounds), "
+        f"data as (select date_trunc('{grain}', {col}) as period_start, count(*) as n{measure_sql} "
+        f"from {table} where {col} is not null group by 1) "
+        f"select p.period_start, p.period_start + interval {step} as period_end, coalesce(d.n, 0) as n{measure_out} "
+        f"from periods p left join data d on p.period_start = d.period_start order by 1"
+    )
+    for i, p in enumerate(periods):
+        # a day is never partial; a week / month / quarter / year is if the data starts after it begins
+        # or ends before its last day
+        first_cut = i == 0 and lo.date() > p["period_start"].date()
+        last_cut = i == len(periods) - 1 and hi.date() < (p["period_end"] - timedelta(days=1)).date()
+        p["is_partial"] = grain != "day" and (first_cut or last_cut)
+
+    series = []
+    for p in periods:
+        base = {"date_column": name, "grain": grain, "period_start": f"{p['period_start']:%Y-%m-%d %H:%M:%S}",
+                "is_partial": p["is_partial"], "row_count": int(p["n"])}
+        if not measures:
+            series.append({**base, "measure_name": None, "measure_value": None})
+        for j, m in enumerate(measures):
+            total = to_float(p[f"s_{j}"])
+            series.append({**base, "measure_name": f"sum of {m['column_name']}", "measure_value": 0.0 if total is None else total})
+            series.append({**base, "measure_name": f"mean of {m['column_name']}", "measure_value": to_float(p[f"a_{j}"])})
+
+    # patterns: weekday always, month of year if the span covers 12+ months, hour of day if real times exist
+    months_spanned = (hi.year - lo.year) * 12 + hi.month - lo.month
+    patterns_wanted = {"day_of_week": (f"((dayofweek({col}) + 5) % 7) + 1", WEEKDAYS)}
+    if months_spanned >= 12:
+        patterns_wanted["month_of_year"] = (f"month({col})", MONTHS)
+    if bounds["timed"]:
+        patterns_wanted["hour_of_day"] = (f"hour({col}) + 1", [f"{h:02d}:00" for h in range(24)])
+    mean_sql = "".join(f", avg(cast({v} as double)) as a_{j}" for j, v in enumerate(values))
+    found = run_sql(" union all ".join(
+        f"select '{pattern}' as pattern_type, {bucket_sql} as bucket_order, count(*) as n{mean_sql} "
+        f"from {table} where {col} is not null group by 2"
+        for pattern, (bucket_sql, _) in patterns_wanted.items()
+    ))
+    total_rows = int(bounds["n"])
+    patterns, pattern_facts = [], {}
+    for pattern, (_, labels) in patterns_wanted.items():
+        by_order = {int(r["bucket_order"]): r for r in found if r["pattern_type"] == pattern}
+        buckets = []
+        for order, label in enumerate(labels, start=1):
+            r = by_order.get(order, {})
+            n = int(r.get("n", 0))
+            buckets.append((label, n))
+            base = {"date_column": name, "pattern_type": pattern, "bucket": label, "bucket_order": order,
+                    "row_count": n, "share_pct": round(100 * n / total_rows, 2)}
+            if not measures:
+                patterns.append({**base, "measure_name": None, "measure_value": None})
+            for j, m in enumerate(measures):
+                patterns.append({**base, "measure_name": f"mean of {m['column_name']}", "measure_value": to_float(r.get(f"a_{j}"))})
+        # hours with no rows at all are left out of busiest / quietest (a shop closed at 3am isn't "quiet")
+        pattern_facts[pattern] = busiest_and_quietest([b for b in buckets if b[1] > 0] if pattern == "hour_of_day" else buckets)
+
+    full = [p for p in periods if not p["is_partial"]]
+    facts = {
+        "column": name, "grain": grain, "start": lo, "end": hi, "span_days": round(span_days),
+        "date_note": date_column.get("date_note"), "period_count": len(periods),
+        "partial_periods": sum(p["is_partial"] for p in periods),
+        "empty_periods": sum(p["n"] == 0 for p in periods), "full_periods": len(full),
+        "busiest_period": busiest_and_quietest([(period_label(p["period_start"], grain), int(p["n"])) for p in full]),
+        "patterns": pattern_facts, "changes": {},
+    }
+    if len(full) >= 2:
+        first, last = full[0], full[-1]
+        facts["change_from"], facts["change_to"] = period_label(first["period_start"], grain), period_label(last["period_start"], grain)
+        facts["changes"]["rows"] = change(first["n"], last["n"])
+        for j, m in enumerate(measures):
+            facts["changes"][f"sum of {m['column_name']}"] = change(to_float(first[f"s_{j}"]) or 0.0, to_float(last[f"s_{j}"]) or 0.0)
+    return series, patterns, facts
 
 
 # ---------- AI report ----------
@@ -532,8 +851,8 @@ def cleanup(processed_path: str | None = None, dry_run: bool = False) -> None:
     1. processed_path: the CSV this run just profiled (its results are saved, so the file isn't needed).
     2. Any other CSV in auto_landing older than LEFTOVER_CSV_HOURS (never the one being processed).
     3. Rows in every workspace.auto_insights table (the ones with an upload_id) for uploads older than
-       RESULTS_KEEP_HOURS. Never the Example. latest_upload and profile_sample hold no upload_id
-       (they're replaced every run), so they're left alone.
+       RESULTS_KEEP_HOURS. Never the Example. latest_upload, typed_upload and profile_sample hold no
+       upload_id (they're replaced every run), so they're left alone.
     Each step has its own try/except: a problem only prints a warning, and the next step still runs.
     """
     verb = "Would delete" if dry_run else "Deleted"
@@ -600,39 +919,60 @@ def profile(file_path: str, file_name: str, upload_id: str, loaded_at: datetime)
     if row_count == 0:
         raise RuntimeError(f"{file_name} has no data rows.")
 
+    # read "$1,200", "45%", "yes"/"no" and dd/mm/yyyy text as what they are (into typed_upload)
+    columns = all_columns[:MAX_COLUMNS]
+    for position, column in enumerate(columns, start=1):
+        column["column_position"] = position
+    detect_types(f"{SCHEMA}.latest_upload", columns)
+    build_typed(columns)
+
     # big files: profile a random sample, and say so
-    table, profiled_rows, is_sampled = f"{SCHEMA}.latest_upload", row_count, row_count > MAX_ROWS
+    table, profiled_rows, is_sampled = f"{SCHEMA}.typed_upload", row_count, row_count > MAX_ROWS
     if is_sampled:
         fraction = min(1.0, 1.1 * MAX_ROWS / row_count)
         run_sql(
             f"create or replace table {SCHEMA}.profile_sample as "
-            f"select * from {SCHEMA}.latest_upload where rand(42) < {fraction} limit {MAX_ROWS}"
+            f"select * from {SCHEMA}.typed_upload where rand(42) < {fraction} limit {MAX_ROWS}"
         )
         table = f"{SCHEMA}.profile_sample"
         profiled_rows = int(run_sql(f"select count(*) as n from {table}")[0]["n"])
 
-    columns = all_columns[:MAX_COLUMNS]
-    for position, column in enumerate(columns, start=1):
-        column["column_position"] = position
     profile_columns(table, columns, profiled_rows)
     numerics = [c for c in columns if c["column_type"] == "numeric"]
-    categoricals = [c for c in columns if c["column_type"] == "categorical"]
-    print(f"{row_count:,} rows, {len(all_columns)} columns: "
-          + ", ".join(f"{c['column_name']} ({c['column_type']})" for c in columns))
+    categoricals = [c for c in columns if c["column_type"] in ("categorical", "boolean")]
+    # the most complete date columns first; the most complete numeric columns are the measures over time
+    dates = sorted([c for c in columns if c["column_type"] == "date" and c["non_null_count"]],
+                   key=lambda c: -c["non_null_count"])[:TIME_COLUMNS]
+    measures = sorted(numerics, key=lambda c: -c["non_null_count"])[:TIME_MEASURES]
+    print(f"{row_count:,} rows, {len(all_columns)} columns: " + ", ".join(
+        f"{c['column_name']} ({c['column_type']}"
+        + "".join(f", {c[key]}" for key in ("unit", "date_format", "date_note") if c.get(key)) + ")"
+        for c in columns
+    ))
 
-    top = top_values(table, categoricals, profiled_rows)
-    corr = correlations(table, numerics)
-    groups = group_insights(table, categoricals, numerics)
-    bins = histograms(table, numerics)
+    # only the analyses that apply to these columns
+    top = top_values(table, categoricals, profiled_rows) if categoricals else []
+    corr = correlations(table, numerics) if len(numerics) >= 2 else []
+    groups = group_insights(table, categoricals, numerics) if categoricals and numerics else []
+    bins = histograms(table, numerics) if numerics else []
+    series, patterns, time_facts = [], [], []
+    for date_column in dates:
+        column_series, column_patterns, facts = time_analysis(table, date_column, measures)
+        series += column_series
+        patterns += column_patterns
+        time_facts.append(facts)
 
     def keyed(rows: list[dict]) -> list[dict]:
         return [{"upload_id": upload_id, **row} for row in rows]
 
     insert_rows("column_profile", keyed(columns))
+    insert_rows("column_details", keyed(columns))
     insert_rows("top_values", keyed(top))
     insert_rows("correlations", keyed(corr))
     insert_rows("group_insights", keyed(groups))
     insert_rows("histograms", keyed(bins))
+    insert_rows("time_series", keyed(series))
+    insert_rows("time_patterns", keyed(patterns))
 
     upload = {
         "upload_id": upload_id, "file_name": file_name, "file_path": file_path, "row_count": row_count,
@@ -670,11 +1010,37 @@ def create_example(local_csv: str) -> None:
     profile(file_path, file_name, EXAMPLE_ID, datetime.now(timezone.utc))
 
 
+def profile_test_file(local_csv: str) -> None:
+    """Profile a local CSV as if it was uploaded on the page, WITHOUT starting the Job. Run from a laptop.
+
+    The CSV goes to its own test volume (not auto_landing, so the Job doesn't notice it), under an
+    upload-style name with a random part, so the result opens with a private ?report= link and is
+    removed by the normal 24-hour clean-up. Nothing is deleted here; the test CSV stays in test_data.
+    """
+    from databricks.sdk import WorkspaceClient
+
+    run_sql(f"create volume if not exists {TEST_VOLUME}")
+    now = datetime.now(timezone.utc)
+    # same format as landing_name() in dashboards/uploader.py
+    clean = re.sub(r"[^a-z0-9]+", "_", os.path.splitext(os.path.basename(local_csv))[0].lower()).strip("_")[:60].strip("_") or "file"
+    file_name = f"upload_{now:%Y%m%dT%H%M%SZ}_{secrets.token_urlsafe(16)}_{clean}.csv"
+    file_path = TEST_PATH + file_name
+    with open(local_csv, "rb") as file:
+        WorkspaceClient(
+            host="https://" + os.environ["DATABRICKS_HOST"].removeprefix("https://").rstrip("/"),
+            token=os.environ["DATABRICKS_TOKEN"],
+        ).files.upload(file_path, file, overwrite=False)
+    upload_id = f"{now:%Y%m%d_%H%M%S}_{file_name}"
+    profile(file_path, file_name, upload_id, now)
+    print(f"\nPrivate link (24 hours): ?report={upload_id}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--setup-only", action="store_true", help="only create the volume, schema and tables")
     parser.add_argument("--cleanup-dry-run", action="store_true", help="only show what the clean-up would delete")
     parser.add_argument("--as-example", metavar="CSV", help="create the pinned Example from this local CSV (once)")
+    parser.add_argument("--test-file", metavar="CSV", help="profile this local CSV via the test volume (doesn't start the Job)")
     args = parser.parse_args()
 
     if args.cleanup_dry_run:
@@ -687,6 +1053,9 @@ def main() -> None:
         return
     if args.as_example:
         create_example(args.as_example)
+        return
+    if args.test_file:
+        profile_test_file(args.test_file)
         return
 
     file_path, file_name = newest_csv()
