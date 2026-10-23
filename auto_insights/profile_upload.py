@@ -86,6 +86,9 @@ DATE_FAMILIES = {
 # time grains, smallest first: (name for date_trunc, step for sequence(), roughly how many days per step)
 GRAINS = [("day", "1 day", 1), ("week", "1 week", 7), ("month", "1 month", 30.44),
           ("quarter", "3 month", 91.31), ("year", "1 year", 365.25)]
+# how units and column types are named in the AI facts
+UNIT_LABELS = {"currency": "money", "percent": "%"}
+TYPE_NAMES = {"numeric": "numeric", "categorical": "category", "boolean": "yes/no", "date": "date", "id_text": "ID / free text"}
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -145,13 +148,16 @@ TABLES = {
     },
 }
 
+# the sections depend on the file: "Trends over time" only when a date column was analysed (see build_prompt)
 AI_PROMPT = """You are a careful data analyst. Below is an automatic profile of a CSV file someone uploaded.
 Write a short report for a general audience. Rules:
 - Use ONLY the numbers in the facts. Do not add, estimate or round to new numbers.
-- Never invent causes or reasons. A correlation or a group difference is not proof that one thing causes another; say "went with" or "was linked to", not "caused" or "led to".
-- If a group difference or correlation is weak, say so.
-- Plain English, Australian spelling (e.g. analyse, colour, organisation). About 200 words.
-- Use exactly these four sections, each as a markdown heading (###): What the data is, Data quality, Key insights (3 to 5 bullet points), Worth checking next.
+- Never invent causes or reasons. A correlation, a group difference or a change over time is not proof that one thing causes another; say "went with" or "was linked to", not "caused" or "led to".
+- Never forecast or predict what happens next.
+- If a group difference, correlation or change is weak or flat, say so.
+- Only write about what the facts contain. If a kind of column is missing, say so at most once, in one short sentence under Data quality.
+- Plain English, Australian spelling (e.g. analyse, colour, organisation). About 250 words.
+- Use exactly these sections, in this order, each as a markdown heading (###): {sections}.
 - Don't mention these rules.
 
 Facts:
@@ -732,7 +738,7 @@ def time_analysis(table: str, date_column: dict, measures: list[dict]) -> tuple[
     full = [p for p in periods if not p["is_partial"]]
     facts = {
         "column": name, "grain": grain, "start": lo, "end": hi, "span_days": round(span_days),
-        "date_note": date_column.get("date_note"), "period_count": len(periods),
+        "date_note": date_column.get("date_note"), "period_count": len(periods), "months_covered": months_spanned + 1,
         "partial_periods": sum(p["is_partial"] for p in periods),
         "empty_periods": sum(p["n"] == 0 for p in periods), "full_periods": len(full),
         "busiest_period": busiest_and_quietest([(period_label(p["period_start"], grain), int(p["n"])) for p in full]),
@@ -764,9 +770,58 @@ def display_name(file_name: str) -> str:
     return re.sub(r"^upload_[0-9]{8}T[0-9]{6}Z_[A-Za-z0-9_-]{22}_", "", file_name)
 
 
-def build_facts(upload: dict, columns: list[dict], top: list[dict], corr: list[dict], groups: list[dict]) -> str:
-    """Compact text of facts from the profile. id / free-text columns are only named, never described."""
+def describe_change(label: str, c: dict) -> str:
+    """'rows 67 -> 59 (-11.9%, down)'; without a % when the first value was 0."""
+    if c["pct"] is None:
+        return f"{label} {fmt(c['first'])} -> {fmt(c['last'])}"
+    return f"{label} {fmt(c['first'])} -> {fmt(c['last'])} ({c['pct']:+.1f}%, {c['direction']})"
+
+
+def time_lines(t: dict) -> list[str]:
+    """The facts for one analysed date column."""
+    grain = t["grain"]
     lines = [
+        f"- {t['column']}: {t['start']:%Y-%m-%d} to {t['end']:%Y-%m-%d} ({t['span_days']:,} days), counted per {grain}: "
+        f"{t['period_count']} {grain}s"
+        + (f", {t['partial_periods']} of them partial (only partly covered, left out of the comparisons)" if t["partial_periods"] else "")
+        + (f", {t['empty_periods']} with no rows at all" if t["empty_periods"] else ", none empty") + "."
+    ]
+    if t["date_note"]:
+        lines.append(f"  Note: {t['date_note']}.")
+    if t["changes"]:
+        lines.append(
+            f"  First to last full {grain} ({t['change_from']} to {t['change_to']}): "
+            + "; ".join(describe_change(label, c) for label, c in t["changes"].items())
+            + f". Changes under {FLAT_PCT}% either way count as flat."
+        )
+    else:
+        lines.append(f"  Fewer than 2 full {grain}s, so no change over time is given.")
+    if t["busiest_period"]:
+        (b_label, b_rows), (q_label, q_rows) = t["busiest_period"]["busiest"], t["busiest_period"]["quietest"]
+        lines.append(f"  Busiest full {grain}: {b_label} ({b_rows:,} rows). Quietest: {q_label} ({q_rows:,} rows).")
+    names = {"day_of_week": "weekday", "month_of_year": "month of the year", "hour_of_day": "hour of the day"}
+    for pattern, found in t["patterns"].items():
+        if found:
+            (b_label, b_rows), (q_label, q_rows) = found["busiest"], found["quietest"]
+            lines.append(f"  Busiest {names[pattern]}: {b_label} ({b_rows:,} rows). Quietest: {q_label} ({q_rows:,} rows)."
+                         + (f" The data covers {t['months_covered']} calendar months, so some months appear in it more "
+                            "often than others." if pattern == "month_of_year" and t["months_covered"] % 12 else ""))
+    return lines
+
+
+def build_facts(upload: dict, columns: list[dict], top: list[dict], corr: list[dict], groups: list[dict],
+                time_facts: list[dict]) -> str:
+    """Compact text of facts from the profile, in labelled sections. A section is only written when it has
+    something in it. id / free-text columns are only named, never described."""
+    by_type = {}
+    for c in columns:
+        by_type.setdefault(c["column_type"], []).append(c)
+
+    def named(c: dict) -> str:
+        return c["column_name"] + (f" ({UNIT_LABELS[c['unit']]})" if c.get("unit") else "")
+
+    lines = [
+        "## Overview",
         f"File: {display_name(upload['file_name'])}",
         f"Rows: {upload['row_count']:,}. Columns: {upload['column_count']}"
         + (f" (first {upload['profiled_column_count']} profiled)" if upload["profiled_column_count"] < upload["column_count"] else "")
@@ -774,34 +829,53 @@ def build_facts(upload: dict, columns: list[dict], top: list[dict], corr: list[d
     ]
     if upload["is_sampled"]:
         lines.append(f"Stats are from a random sample of {upload['profiled_row_count']:,} rows.")
-
-    by_type = {}
-    for c in columns:
-        by_type.setdefault(c["column_type"], []).append(c["column_name"])
-    lines.append("Column types: " + "; ".join(f"{kind}: {', '.join(names)}" for kind, names in by_type.items()))
+    lines.append("Column types: " + "; ".join(
+        f"{TYPE_NAMES[kind]}: {', '.join(named(c) for c in cols)}" for kind, cols in by_type.items()
+    ))
     if by_type.get("id_text"):
-        lines.append("id_text columns (nearly every value unique) are left out of the analysis.")
+        lines.append("ID / free-text columns (nearly every value unique) are left out of the analysis.")
 
+    lines.append("\n## Data quality")
     missing = [c for c in columns if c["null_pct"] > 0]
-    lines.append(
-        "Missing values: " + (", ".join(f"{c['column_name']} {c['null_pct']}%" for c in missing) if missing else "none")
-    )
+    lines.append("Missing values: " + (", ".join(f"{c['column_name']} {c['null_pct']}%" for c in missing) if missing else "none"))
+    absent = [TYPE_NAMES[kind] for kind in ("numeric", "categorical", "date") if not by_type.get(kind)]
+    if absent:
+        lines.append("Not in this file: " + ", ".join(absent) + " columns.")
+    lines += [f"Date note: {c['column_name']}: {c['date_note']}." for c in columns if c.get("date_note")]
+    for c in columns:
+        if c.get("is_dominated"):
+            first = next(t for t in top if t["column_name"] == c["column_name"] and t["value_rank"] == 1)
+            lines.append(f"One value dominates {c['column_name']}: '{first['value']}' is {c['top_value_pct']}% of its values.")
 
-    lines.append("Numeric columns (min / p25 / median / mean / p75 / max):")
-    for c in [c for c in columns if c["column_type"] == "numeric"]:
-        lines.append(
-            f"- {c['column_name']}: {fmt(c['min_value'])} / {fmt(c['p25_value'])} / {fmt(c['median_value'])} / "
-            f"{fmt(c['mean_value'])} / {fmt(c['p75_value'])} / {fmt(c['max_value'])}"
-        )
-    for c in [c for c in columns if c["column_type"] == "date"]:
-        lines.append(f"Date column {c['column_name']}: {c['min_date']} to {c['max_date']}")
+    if by_type.get("numeric"):
+        lines.append("\n## Numeric columns (min / p25 / median / mean / p75 / max)")
+        for c in by_type["numeric"]:
+            extras = [f"skew: {c['skew_direction']}"] if c.get("skew_direction") else []
+            if c.get("outlier_count"):
+                extras.append(f"{c['outlier_count']:,} outliers ({c['outlier_pct']}%, outside 1.5 x IQR)")
+            if c.get("zero_pct"):
+                extras.append(f"{c['zero_pct']}% zeros")
+            if c.get("negative_pct"):
+                extras.append(f"{c['negative_pct']}% negative")
+            lines.append(
+                f"- {named(c)}: {fmt(c['min_value'])} / {fmt(c['p25_value'])} / {fmt(c['median_value'])} / "
+                f"{fmt(c['mean_value'])} / {fmt(c['p75_value'])} / {fmt(c['max_value'])}"
+                + (f"; {'; '.join(extras)}" if extras else "")
+            )
 
-    lines.append("Categorical columns (top values, % of rows):")
-    for c in [c for c in columns if c["column_type"] == "categorical"]:
-        values = [t for t in top if t["column_name"] == c["column_name"]][:5]
-        shown = ", ".join(f"{t['value']} {t['pct_of_rows']}%" for t in values) if values else "too many to list"
-        lines.append(f"- {c['column_name']} ({c['distinct_count']} distinct): {shown}")
+    category_columns = by_type.get("categorical", []) + by_type.get("boolean", [])
+    if category_columns:
+        lines.append("\n## Category and yes/no columns (top values, % of rows)")
+        for c in category_columns:
+            values = [t for t in top if t["column_name"] == c["column_name"]]
+            shown = [f"{t['value']} {t['pct_of_rows']}%" for t in values if t["value_rank"] <= 5]
+            other = [t for t in values if t["value_rank"] > TOP_VALUES_SHOWN]
+            if other:
+                shown.append(f"all values outside the top {TOP_VALUES_SHOWN}: {other[0]['pct_of_rows']}%")
+            lines.append(f"- {c['column_name']} ({c['distinct_count']} distinct): {', '.join(shown)}")
 
+    if corr or groups:
+        lines.append("\n## Relationships")
     if corr:
         lines.append("Strongest correlations (Pearson r, -1 to 1):")
         lines += [f"- {c['column_a']} and {c['column_b']}: {c['pearson_r']:.2f}" for c in corr[:5]]
@@ -813,17 +887,31 @@ def build_facts(upload: dict, columns: list[dict], top: list[dict], corr: list[d
             f"overall {fmt(g['overall_mean'])}"
             for g in groups
         ]
+
+    if time_facts:
+        lines.append("\n## Trends over time")
+        for t in time_facts:
+            lines += time_lines(t)
     return "\n".join(lines)
 
 
-def write_ai_report(upload_id: str, facts: str) -> str:
+def build_prompt(has_time: bool) -> str:
+    """The prompt, with "Trends over time" only when a date column was analysed."""
+    sections = ["What the data is", "Data quality", "Key insights (3 to 5 bullet points)"]
+    if has_time:
+        sections.append("Trends over time (2 to 4 bullet points)")
+    sections.append("Worth checking next")
+    return AI_PROMPT.format(sections=", ".join(sections))
+
+
+def write_ai_report(upload_id: str, prompt: str, facts: str) -> str:
     """ONE ai_query call per upload. The facts are stored next to the answer so it can be checked."""
     run_sql(
         f"insert into {SCHEMA}.ai_report "
         f"select :upload_id, :facts, ai_query('{AI_MODEL}', concat(:prompt, :facts), "
         "modelParameters => named_struct('temperature', 0.2)), "
         f"'{AI_MODEL}', current_timestamp()",
-        {"upload_id": upload_id, "facts": facts, "prompt": AI_PROMPT},
+        {"upload_id": upload_id, "facts": facts, "prompt": prompt},
     )
     return run_sql(f"select report_text from {SCHEMA}.ai_report where upload_id = :upload_id", {"upload_id": upload_id})[0]["report_text"]
 
@@ -980,7 +1068,8 @@ def profile(file_path: str, file_name: str, upload_id: str, loaded_at: datetime)
         "profiled_row_count": profiled_rows, "is_sampled": is_sampled,
         "loaded_at": loaded_at.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    report = write_ai_report(upload_id, build_facts(upload, columns, top, corr, groups))
+    facts = build_facts(upload, columns, top, corr, groups, time_facts)
+    report = write_ai_report(upload_id, build_prompt(has_time=bool(time_facts)), facts)
 
     # written last: the dashboard only lists uploads that finished every step
     insert_rows("uploads", [upload])
