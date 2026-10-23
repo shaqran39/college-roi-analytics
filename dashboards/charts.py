@@ -10,6 +10,7 @@ BLUE = "#2a78d6"        # main series
 BLUE_LIGHT = "#86b6ef"  # "without" side of a with/without comparison
 BLUE_DARK = "#184f95"   # "with" side of a with/without comparison
 RED = "#e34948"         # below zero: worse off than not going to college
+ORANGE = "#eb6834"      # the negative side of a +/- measure (e.g. a negative correlation); always with a +/- label
 GREY = "#898781"        # context marks, connectors, zero line
 GRID = "rgba(137,135,129,0.25)"
 FONT_SIZE = 15          # all chart text: big enough for a laptop and a phone
