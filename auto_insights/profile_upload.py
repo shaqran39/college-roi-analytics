@@ -61,12 +61,19 @@ PARSE_SHARE = 0.90          # a text column where 90%+ of values read as numbers
 HISTOGRAM_COLUMNS = 6
 HISTOGRAM_BINS = 20
 SKEW_THRESHOLD = 0.5        # skewness beyond +/-0.5 = a long tail on one side
+SKEW_MIN_DISTINCT = 10      # skew is only named for columns with 10+ different values (not for 1-5 ratings)
 OUTLIER_IQR = 1.5           # outlier = more than 1.5 x IQR below p25 or above p75
 
 TIME_COLUMNS = 2            # analyse at most 2 date columns (the most complete ones)
-TIME_MEASURES = 3           # per period: sum and mean of the 3 most complete numeric columns
+TIME_MEASURES = 3           # per period: up to 3 numeric columns (money that adds up first, then the most complete)
 MAX_PERIODS = 200
 FLAT_PCT = 5                # a change under 5% either way is "flat"
+# words in a column name (split on "_") that say how it's added up per period. Levels like a price or a
+# rate are averaged (a sum of prices means nothing); only amounts that add up are summed. Anything else is averaged.
+MEAN_WORDS = {"price", "rate", "rating", "percent", "pct", "score", "age", "avg", "average", "mean"}
+SUM_WORDS = {"revenue", "amount", "sales", "sale", "qty", "quantity", "count", "cost", "total",
+             "items", "units", "orders", "spend"}
+MONEY_WORDS = {"revenue", "amount", "sales", "sale", "cost", "spend"}
 
 NUMERIC_TYPES = ("tinyint", "smallint", "int", "bigint", "float", "double", "decimal")
 WHOLE_NUMBER_TYPES = ("tinyint", "smallint", "int", "bigint")
@@ -455,7 +462,9 @@ def profile_columns(table: str, columns: list[dict], row_count: int) -> None:
                 mean_value=to_float(stats[f"mean_{i}"]), median_value=to_float(stats[f"med_{i}"]),
                 p25_value=to_float(stats[f"p25_{i}"]), p75_value=to_float(stats[f"p75_{i}"]),
                 skewness=None if skewness is None else round(skewness, 4),
-                skew_direction=(None if skewness is None else "right (long tail of high values)" if skewness > SKEW_THRESHOLD
+                # a handful of different values (a 1-5 rating, 0/1/2 children) has no meaningful "tail"
+                skew_direction=(None if skewness is None or distinct < SKEW_MIN_DISTINCT
+                                else "right (long tail of high values)" if skewness > SKEW_THRESHOLD
                                 else "left (long tail of low values)" if skewness < -SKEW_THRESHOLD else "roughly symmetric"),
                 zero_pct=round(100 * stats[f"zero_{i}"] / non_null, 2) if non_null else None,
                 negative_pct=round(100 * stats[f"neg_{i}"] / non_null, 2) if non_null else None,
@@ -660,8 +669,42 @@ def busiest_and_quietest(buckets: list[tuple[str, int]]) -> dict | None:
     return {"busiest": max(buckets, key=lambda b: b[1]), "quietest": min(buckets, key=lambda b: b[1])}
 
 
+def name_words(column: dict) -> set[str]:
+    """'unit_price' -> {'unit', 'price'}; plurals also count as the singular ('sales' -> 'sale')."""
+    words = set(column["column_name"].split("_"))
+    return words | {w.removesuffix("s") for w in words}
+
+
+def how_added_up(column: dict) -> str:
+    """'sum' for amounts that add up per period (revenue, qty), else 'mean' (a price, a rate, a %, a score)."""
+    words = name_words(column)
+    if column.get("unit") == "percent" or words & MEAN_WORDS:
+        return "mean"
+    return "sum" if words & SUM_WORDS else "mean"
+
+
+def pick_measures(numerics: list[dict]) -> list[dict]:
+    """Up to 3 measures over time: money that adds up (revenue, sales) first, then the most complete columns.
+    Each gets time_agg = 'sum' or 'mean'."""
+    for c in numerics:
+        c["time_agg"] = how_added_up(c)
+
+    def is_money_total(c: dict) -> bool:
+        return c["time_agg"] == "sum" and (c.get("unit") == "currency" or bool(name_words(c) & MONEY_WORDS))
+
+    # sorted() keeps the file's column order among equals
+    return sorted(numerics, key=lambda c: (not is_money_total(c), -c["non_null_count"]))[:TIME_MEASURES]
+
+
+def period_value(period: dict, j: int, measure: dict) -> float | None:
+    """One period's value of measure j: its sum (0 for an empty period) or its mean (none for an empty period)."""
+    if measure["time_agg"] == "sum":
+        return to_float(period[f"s_{j}"]) or 0.0
+    return to_float(period[f"a_{j}"])
+
+
 def time_analysis(table: str, date_column: dict, measures: list[dict]) -> tuple[list[dict], list[dict], dict]:
-    """Rows per period (plus sum and mean of up to 3 measures) and day / month / hour patterns for one date column.
+    """Rows per period (plus the sum or mean of up to 3 measures) and day / month / hour patterns for one date column.
 
     Returns (time_series rows, time_patterns rows, facts for the AI). Empty periods are kept (0 rows) and
     the first / last period is marked partial when the data doesn't cover all of it.
@@ -702,9 +745,7 @@ def time_analysis(table: str, date_column: dict, measures: list[dict]) -> tuple[
         if not measures:
             series.append({**base, "measure_name": None, "measure_value": None})
         for j, m in enumerate(measures):
-            total = to_float(p[f"s_{j}"])
-            series.append({**base, "measure_name": f"sum of {m['column_name']}", "measure_value": 0.0 if total is None else total})
-            series.append({**base, "measure_name": f"mean of {m['column_name']}", "measure_value": to_float(p[f"a_{j}"])})
+            series.append({**base, "measure_name": f"{m['time_agg']} of {m['column_name']}", "measure_value": period_value(p, j, m)})
 
     # patterns: weekday always, month of year if the span covers 12+ months, hour of day if real times exist
     months_spanned = (hi.year - lo.year) * 12 + hi.month - lo.month
@@ -751,7 +792,7 @@ def time_analysis(table: str, date_column: dict, measures: list[dict]) -> tuple[
         facts["change_from"], facts["change_to"] = period_label(first["period_start"], grain), period_label(last["period_start"], grain)
         facts["changes"]["rows"] = change(first["n"], last["n"])
         for j, m in enumerate(measures):
-            facts["changes"][f"sum of {m['column_name']}"] = change(to_float(first[f"s_{j}"]) or 0.0, to_float(last[f"s_{j}"]) or 0.0)
+            facts["changes"][f"{m['time_agg']} of {m['column_name']}"] = change(period_value(first, j, m), period_value(last, j, m))
     return series, patterns, facts
 
 
@@ -1030,10 +1071,10 @@ def profile(file_path: str, file_name: str, upload_id: str, loaded_at: datetime)
     profile_columns(table, columns, profiled_rows)
     numerics = [c for c in columns if c["column_type"] == "numeric"]
     categoricals = [c for c in columns if c["column_type"] in ("categorical", "boolean")]
-    # the most complete date columns first; the most complete numeric columns are the measures over time
+    # the most complete date columns first; measures over time: money totals first, then the most complete
     dates = sorted([c for c in columns if c["column_type"] == "date" and c["non_null_count"]],
                    key=lambda c: -c["non_null_count"])[:TIME_COLUMNS]
-    measures = sorted(numerics, key=lambda c: -c["non_null_count"])[:TIME_MEASURES]
+    measures = pick_measures(numerics)
     print(f"{row_count:,} rows, {len(all_columns)} columns: " + ", ".join(
         f"{c['column_name']} ({c['column_type']}"
         + "".join(f", {c[key]}" for key in ("unit", "date_format", "date_note") if c.get(key)) + ")"

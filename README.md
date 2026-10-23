@@ -90,7 +90,7 @@ A second, separate path for **any CSV with any columns**. It never touches the c
 1. **Drop a CSV** into `/Volumes/workspace/raw/auto_landing/` (new file name each time).
 2. **The Job `auto_insights_refresh`** ([definition](orchestration/auto_insights_job.yml)) runs [`auto_insights/profile_upload.py`](auto_insights/profile_upload.py). It loads the newest CSV into `workspace.auto_insights.latest_upload`, cleans the column names (snake_case) and profiles the first 50 columns (a random 1M-row sample for bigger files).
 3. **Each column gets a type**, and the analysis adapts to it:
-   - **Numeric**, including numbers stored as text like `$1,200`, `1,200` or `45%` (the unit is kept: money or %). Plus skew, outliers (1.5 × IQR rule), and the share of zeros and negatives.
+   - **Numeric**, including numbers stored as text like `$1,200`, `1,200` or `45%` (the unit is kept: money or %). Plus skew (only for columns with 10+ different values), outliers (1.5 × IQR rule), and the share of zeros and negatives.
    - **Yes / no**: yes/no, true/false or 0/1 columns, analysed like a category.
    - **Category**: top 10 values plus an "Other" share, and a flag when one value is over 80%.
    - **Date**: common formats, including Australian dd/mm/yyyy. If the first part is ever over 12 it's dd/mm, if the second is it's mm/dd, and if it can't tell it reads dd/mm and says so. Columns Databricks guesses are dates are re-read as text first, so these rules always apply.
@@ -108,7 +108,7 @@ A second, separate path for **any CSV with any columns**. It never touches the c
    | `correlations` | Top 10 Pearson correlations between numeric columns |
    | `group_insights` | Biggest differences in a numeric column's average across a category's groups (groups of 30+ rows) |
    | `histograms` | 20 bins for up to 6 numeric columns, for the charts |
-   | `time_series` | For up to 2 date columns: rows per day, week or month (chosen from the span, at most ~200 points), plus sum and mean of the 3 most complete numeric columns. Empty periods are kept, and partial first / last periods are marked |
+   | `time_series` | For up to 2 date columns: rows per day, week or month (chosen from the span, at most ~200 points), plus up to 3 numeric columns: money totals like revenue first, then the most complete ones. Each one is either summed (amounts that add up: revenue, sales, amount, cost, qty, count) or averaged (prices, rates, %, scores, ages, and anything else), never both. Empty periods are kept, and partial first / last periods are marked |
    | `time_patterns` | Rows (and means) by weekday, by month of the year (if the data spans 12+ months) and by hour (if there are real times) |
    | `ai_report` | ONE `ai_query` report per upload (about 250 words) and the exact `input_facts` it was given |
 
