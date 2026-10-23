@@ -1,4 +1,4 @@
-"""Page 5: Auto insights. The automatic profile, charts and AI report for any uploaded CSV.
+"""Page 5: Analyse your CSV (auto insights). The automatic profile, charts and AI report for any uploaded CSV.
 
 Reads only the workspace.auto_insights tables written by auto_insights/profile_upload.py.
 Each upload is private. The page shows exactly one upload, picked in this order:
@@ -371,7 +371,7 @@ def trends(series: pd.DataFrame, patterns: pd.DataFrame) -> None:
 # ---------- the page ----------
 
 updated_slot = page_header(
-    "Auto insights",
+    "Analyse your CSV",
     "What's in a CSV, how complete is it, and what are its main patterns? An automatic first look at **any CSV**, "
     "with a short AI-written report. Upload one below (password needed) and only you see the results, for 24 hours.",
 )

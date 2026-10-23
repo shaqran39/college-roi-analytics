@@ -1,4 +1,4 @@
-"""Password-protected CSV upload for the Auto insights page, plus a live progress tracker.
+"""Password-protected CSV upload for the Analyse your CSV page (views/auto_insights.py), plus a live progress tracker.
 
 Viewing the page is public; uploading needs st.secrets["upload_password"].
 The file is saved to the auto_landing volume with its own, write-only token

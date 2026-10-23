@@ -1,4 +1,4 @@
-"""AppTest: the Auto insights page shows exactly the tabs and sections that apply to each upload.
+"""AppTest: the Analyse your CSV page (views/auto_insights.py) shows exactly the tabs and sections that apply to each upload.
 
 For each upload it reads which auto_insights tables have rows, works out what the page SHOULD show,
 then runs the page and checks it shows exactly that (and no errors). The Example is always checked.

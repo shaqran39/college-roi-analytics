@@ -32,7 +32,7 @@ MARTS          star schema + summary tables
    ├── AI: summary of key findings on every run       mart_key_findings        (Databricks ai_query)
    ▼
 Public Streamlit dashboard   (4 pages: Overview, Majors, Colleges & choices, Deep dive with a What-if tool,
-                              plus an "Auto insights" page for any CSV, see below)
+                              plus an "Analyse your CSV" page for any CSV, see below)
 
 All of it runs automatically from a Databricks Job when a new CSV arrives.
 Built with Claude Code as AI pair-engineer. Every step is tested with dbt (models + data tests).
@@ -84,7 +84,7 @@ Both tasks run the code on `main` straight from GitHub, so a merged PR is live o
 
 Extra columns are ignored, because staging only picks the columns it knows.
 
-## Auto insights (any CSV)
+## Analyse your CSV (auto insights)
 A second, separate path for **any CSV with any columns**. It never touches the college pipeline above.
 
 1. **Drop a CSV** into `/Volumes/workspace/raw/auto_landing/` (new file name each time).
@@ -113,7 +113,7 @@ A second, separate path for **any CSV with any columns**. It never touches the c
    | `ai_report` | ONE `ai_query` report per upload (about 250 words) and the exact `input_facts` it was given |
 
    The AI report adapts too. Its sections are What the data is, Data quality, Key insights, **Trends over time** (only when there's a date column) and Worth checking next, and the facts only include what the file has.
-5. **The dashboard's "Auto insights" page is private per upload, and only shows what applies.** Tabs appear only when they have content: **Overview** (the AI report, then a Data quality table with % missing bars and units), **Columns** (histograms and top-value charts), **Relationships** (correlation and group-difference charts, each with a table view) and **Trends over time** (a line per date column with partial periods marked, a Rows / sum / mean selector, and weekday / month / hour charts). Everyone sees an **Example** (made-up café data) by default. After you upload a CSV (password needed), that browser session shows only *your* results, plus a private link (`?report=<id>`) you can share. The id contains 22 random characters, so it can't be guessed, and the link works for 24 hours. There is no list of uploads, so nobody can browse anyone else's. A wrong or expired link shows a friendly message and the Example.
+5. **The dashboard's "Analyse your CSV" page (URL `/auto_insights`) is private per upload, and only shows what applies.** Tabs appear only when they have content: **Overview** (the AI report, then a Data quality table with % missing bars and units), **Columns** (histograms and top-value charts), **Relationships** (correlation and group-difference charts, each with a table view) and **Trends over time** (a line per date column with partial periods marked, a Rows / sum / mean selector, and weekday / month / hour charts). Everyone sees an **Example** (made-up café data) by default. After you upload a CSV (password needed), that browser session shows only *your* results, plus a private link (`?report=<id>`) you can share. The id contains 22 random characters, so it can't be guessed, and the link works for 24 hours. There is no list of uploads, so nobody can browse anyone else's. A wrong or expired link shows a friendly message and the Example.
 6. **24-hour retention.** After each successful run, the clean-up deletes the CSV it just profiled, any other CSV in `auto_landing` older than 1 hour (an upload that never got profiled), and every upload's rows in `workspace.auto_insights` once they're more than 24 hours old. The Example (`upload_id = 'example'`) is never deleted. A clean-up problem only logs a warning; the new profile is already saved. To see what it would delete without deleting anything: `python auto_insights/profile_upload.py --cleanup-dry-run`.
 7. **The Example** was created once with `python auto_insights/profile_upload.py --as-example data/raw/cafe_sales_test.csv`. Its CSV is kept in the volume `workspace.auto_insights.example_data` (not `auto_landing`, so it doesn't start the Job). Running it again does nothing if the Example already exists. After the profiler changes, `python auto_insights/profile_upload.py --refresh-example` re-profiles it: it deletes **only** the rows where `upload_id = 'example'` (after checking its CSV can still be read) and writes them again.
 
@@ -141,7 +141,7 @@ To test from a laptop without starting the Job: `python auto_insights/profile_up
   - It also wrote awkward phrases like "losses… a gain", so money sentences are now pre-written in SQL.
   - The headline label on each report card comes from fixed SQL rules, so the AI can't overstate it.
   - The fact sheet the AI saw is stored next to its answer, so every number can be checked.
-- **Don't let the database guess date formats.** Databricks read `07/01/2026` as a date on its own, which happens to work when some days are over 12, but would silently pick a format when every day is 12 or less. Auto insights now reads guessed dates as text and applies its own dd/mm rule, with a note when it can't tell.
+- **Don't let the database guess date formats.** Databricks read `07/01/2026` as a date on its own, which happens to work when some days are over 12, but would silently pick a format when every day is 12 or less. Analyse your CSV now reads guessed dates as text and applies its own dd/mm rule, with a note when it can't tell.
 - **"Nearly every value is unique" isn't enough to call a column an ID.** An income column (whole dollars, almost all different) was skipped as an ID. It now also needs an ID-like name or values that run 1, 2, 3...
 - **Keep secrets out of Git from day one.**
   - The Databricks token lives in environment variables (for dbt) and in Streamlit secrets (for the dashboard).
@@ -149,7 +149,7 @@ To test from a laptop without starting the Job: `python auto_insights/profile_up
   - The exported job definition uses variables for the warehouse ID and the alert email.
 
 ## Limitations
-- **Same 18 columns only.** The pipeline expects the exact columns of `college_major_roi.csv`. A different CSV (other columns or a different topic) needs the dbt models adapted. (Auto insights takes any CSV, but only gives a general profile, not a tailored analysis.)
+- **Same 18 columns only.** The pipeline expects the exact columns of `college_major_roi.csv`. A different CSV (other columns or a different topic) needs the dbt models adapted. (Analyse your CSV takes any CSV, but only gives a general profile, not a tailored analysis.)
 - **New data needs a new file name.** Re-uploading a file with the same name won't start the job.
 - **The dashboard can lag up to 1 hour** behind a job run, because it caches query results for an hour (the **Refresh data** button skips the wait).
 - The data is synthetic, and the findings describe groups, not causes.
@@ -177,7 +177,7 @@ To test from a laptop without starting the Job: `python auto_insights/profile_up
 | Folder | What's in it |
 |---|---|
 | `ingestion/` | `databricks_load_raw.sql`: newest CSV → raw table (job task 1) |
-| `auto_insights/` | `profile_upload.py`: profiles any CSV + AI report (Auto insights job) |
+| `auto_insights/` | `profile_upload.py`: profiles any CSV + AI report (Analyse your CSV, Job `auto_insights_refresh`) |
 | `dbt/` | Models (staging → intermediate → marts, including AI marts), tests, macros |
 | `orchestration/` | The Databricks Job definition (YAML) |
 | `dashboards/` | The Streamlit app (`app.py`, `db.py`, `charts.py`, `views/`) |
