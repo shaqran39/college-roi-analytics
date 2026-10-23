@@ -9,6 +9,7 @@ or from a laptop for testing:
     python auto_insights/profile_upload.py --cleanup-dry-run  # show what the clean-up WOULD delete, delete nothing
     python auto_insights/profile_upload.py --as-example data/raw/cafe_sales_test.csv  # create the pinned Example (once)
     python auto_insights/profile_upload.py --test-file data/raw/test_mixed.csv  # profile a local CSV without the Job
+    python auto_insights/profile_upload.py --refresh-example  # re-profile the Example with the current code
 
 The analysis adapts to the columns: text like "$1,200", "45%", "yes"/"no" or dd/mm/yyyy is read as a
 number, boolean or date first (into typed_upload), and each analysis only runs when it applies
@@ -25,8 +26,9 @@ and the workspace.auto_insights schema.
 Each upload is private: the dashboard shows it only to the person who uploaded it (or anyone with its
 private link), for 24 hours. After each successful run it cleans up (see cleanup()): the CSV it just
 profiled, any CSV left in auto_landing for over an hour, and every upload's rows in workspace.auto_insights
-once they're over 24 hours old. The Example (upload_id 'example') is never deleted.
-This is the ONLY code in the project allowed to delete.
+once they're over 24 hours old. The Example (upload_id 'example') is never deleted by it.
+This is the ONLY code in the project allowed to delete: cleanup(), plus refresh_example(), which
+replaces ONLY the Example's own rows when run by hand.
 """
 
 import argparse
@@ -1099,6 +1101,27 @@ def create_example(local_csv: str) -> None:
     profile(file_path, file_name, EXAMPLE_ID, datetime.now(timezone.utc))
 
 
+def refresh_example() -> None:
+    """Re-profile the pinned Example with the current code. Run from a laptop, by hand.
+
+    The one exception to "never delete" outside cleanup(): it deletes ONLY the rows where
+    upload_id = 'example', then profiles the Example's CSV (in its own volume) again. The CSV is read
+    first, so if it's missing or broken nothing is deleted and the old Example stays.
+    """
+    found = run_sql(f"select file_name, file_path from {SCHEMA}.uploads where upload_id = :example", {"example": EXAMPLE_ID})
+    if not found:
+        print("There's no Example yet. Create it once with --as-example.")
+        return
+    file_name, file_path = found[0]["file_name"], found[0]["file_path"]
+    if not file_path.startswith(EXAMPLE_PATH):
+        raise RuntimeError(f"The Example's CSV should be in {EXAMPLE_PATH}, not {file_path}. Nothing was changed.")
+    load_latest(file_path)  # raises if the CSV can't be read, before anything is deleted
+    for table in ["uploads"] + [t for t in TABLES if t != "uploads"]:
+        run_sql(f"delete from {SCHEMA}.{table} where upload_id = :example", {"example": EXAMPLE_ID})
+    print(f"Deleted the old Example rows; profiling {file_name} again")
+    profile(file_path, file_name, EXAMPLE_ID, datetime.now(timezone.utc))
+
+
 def profile_test_file(local_csv: str) -> None:
     """Profile a local CSV as if it was uploaded on the page, WITHOUT starting the Job. Run from a laptop.
 
@@ -1130,6 +1153,7 @@ def main() -> None:
     parser.add_argument("--cleanup-dry-run", action="store_true", help="only show what the clean-up would delete")
     parser.add_argument("--as-example", metavar="CSV", help="create the pinned Example from this local CSV (once)")
     parser.add_argument("--test-file", metavar="CSV", help="profile this local CSV via the test volume (doesn't start the Job)")
+    parser.add_argument("--refresh-example", action="store_true", help="re-profile the pinned Example with the current code")
     args = parser.parse_args()
 
     if args.cleanup_dry_run:
@@ -1145,6 +1169,9 @@ def main() -> None:
         return
     if args.test_file:
         profile_test_file(args.test_file)
+        return
+    if args.refresh_example:
+        refresh_example()
         return
 
     file_path, file_name = newest_csv()
