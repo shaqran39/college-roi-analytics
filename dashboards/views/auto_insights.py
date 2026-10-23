@@ -117,32 +117,35 @@ def data_quality(profile: pd.DataFrame, details: pd.DataFrame) -> None:
     for column in ("unit", "date_format", "date_note", "skew_direction", "outlier_count", "outlier_pct", "top_value_pct", "is_dominated"):
         if column not in table:
             table[column] = None
+    notes = table.apply(column_notes, axis=1)
+    # the table can't wrap text, so Notes is made as wide as its longest note (about 8px a character)
+    notes_width = max(120, 8 * int(notes.str.len().max() or 0) + 32)
+    # a date column's first / last date goes in Min / Max, so there are no separate date columns
+    # and the table fits the page with Notes in full
     st.dataframe(
         table.assign(
             column=table["column_name"],
             kind=table["column_type"].map(TYPE_LABELS),
             unit=as_text(table["unit"].map(UNIT_LABELS)),
-            min_value=as_text(table["min_value"], number),
+            min_value=as_text(table["min_value"], number).where(table["min_date"].isna(), as_text(table["min_date"])),
             median_value=as_text(table["median_value"], number),
-            max_value=as_text(table["max_value"], number),
-            first=as_text(table["min_date"]),
-            last=as_text(table["max_date"]),
-            notes=table.apply(column_notes, axis=1),
-        )[["column", "kind", "unit", "null_pct", "distinct_count", "min_value", "median_value", "max_value", "first", "last", "notes"]],
+            max_value=as_text(table["max_value"], number).where(table["max_date"].isna(), as_text(table["max_date"])),
+            notes=notes,
+        )[["column", "kind", "unit", "null_pct", "distinct_count", "min_value", "median_value", "max_value", "notes"]],
         hide_index=True,
         width="stretch",
         column_config={
             "column": "Column",
             "kind": st.column_config.TextColumn("Type", help="ID / free text = nearly every value is unique, so it's left out of the charts and the AI report."),
-            "unit": st.column_config.TextColumn("Unit", help="Found from symbols in the values ($, %) or the column name."),
+            "unit": st.column_config.TextColumn("Unit", width=100,  # wide enough for "Money ($)"
+                                                help="Found from symbols in the values ($, %) or the column name."),
             "null_pct": st.column_config.ProgressColumn("% missing", format="%.1f%%", min_value=0, max_value=100),
-            "distinct_count": st.column_config.NumberColumn("Distinct values", format="localized"),
-            "min_value": st.column_config.TextColumn("Min", alignment="right"),
+            "distinct_count": st.column_config.NumberColumn("Distinct", format="localized", help="Number of different values."),
+            # 100px fits a date like 2026-01-01
+            "min_value": st.column_config.TextColumn("Min / first", width=100, alignment="right", help="Lowest value, or the first date."),
             "median_value": st.column_config.TextColumn("Median", alignment="right"),
-            "max_value": st.column_config.TextColumn("Max", alignment="right"),
-            "first": "First date",
-            "last": "Last date",
-            "notes": st.column_config.TextColumn("Notes", help="Outliers = values more than 1.5 × the middle-half range outside it."),
+            "max_value": st.column_config.TextColumn("Max / last", width=100, alignment="right", help="Highest value, or the last date."),
+            "notes": st.column_config.TextColumn("Notes", width=notes_width, help="Outliers = values more than 1.5 × the middle-half range outside it."),
         },
     )
 
