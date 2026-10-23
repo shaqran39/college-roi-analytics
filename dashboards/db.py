@@ -9,7 +9,6 @@ import streamlit as st
 from databricks import sql
 
 MARTS_SCHEMA = "workspace.marts"
-REPO_URL = "https://github.com/shaqran39/college-roi-analytics"
 
 # results are kept for 1 hour, so clicking around the dashboard doesn't wake the warehouse,
 # but new data from the Databricks Job shows up within the hour (or straight away with "Refresh data")

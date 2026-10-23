@@ -2,7 +2,7 @@
 
 import streamlit as st
 
-from db import REPO_URL, data_updated, load_mart, md_safe, money, page_header, pretty
+from db import data_updated, load_mart, md_safe, money, page_header, pretty
 
 STEPS = [  # the "How it works" strip: (icon, step, what happens)
     (":material/description:", "CSV", "30,000 synthetic graduates, one row each"),
@@ -32,7 +32,7 @@ page_header(
 )
 st.markdown(
     "An end-to-end analytics project: a CSV of **30,000 synthetic graduates** goes through Databricks, dbt and AI "
-    "into this dashboard. Explore the results below, or profile **your own CSV** with Auto insights."
+    "into this dashboard. Explore the results below, or try **Analyse your CSV** on a file of your own."
 )
 
 # how it works
@@ -72,10 +72,9 @@ col4.metric(
     border=True,
 )
 
-button1, button2, _ = st.columns([1, 1, 2])
-if button1.button("Profile your own CSV", type="primary", icon=":material/upload_file:", width="stretch"):
+button, _ = st.columns([1, 3])
+if button.button("Analyse your CSV", type="primary", icon=":material/upload_file:", width="stretch"):
     st.switch_page("views/auto_insights.py")
-button2.link_button("Source code on GitHub", REPO_URL, icon=":material/code:", width="stretch")
 
 # AI summary
 st.subheader("Key findings")
