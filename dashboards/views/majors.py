@@ -3,7 +3,7 @@
 import plotly.graph_objects as go
 import streamlit as st
 
-from charts import BLUE, RED, show, style, zero_line
+from charts import BLUE, RED, is_phone, names_above_rows, show, style, zero_line
 from db import data_updated, load_mart, md_safe, money, page_header, pretty
 
 roi_by_major = load_mart("mart_roi_by_major").sort_values("median_net_roi_usd")
@@ -47,8 +47,12 @@ for _, row in roi_by_major[roi_by_major["median_net_roi_usd"] < 0].iterrows():
 # room on the right so the longest bar's label isn't cut off
 low, high = roi_by_major["median_net_roi_usd"].min(), roi_by_major["median_net_roi_usd"].max()
 fig.update_xaxes(title_text="Median 10-year net return (US$)", range=[min(low, 0) * 1.1, high * 1.05])
-style(fig, height=32 * len(roi_by_major) + 100)
+phone = is_phone()
+style(fig, height=(52 if phone else 32) * len(roi_by_major) + 100)
 fig.update_layout(margin_r=90)  # fixed space for the longest label, even on a phone
+if phone:  # names above thinner bars, so the bars get the full width
+    names_above_rows(fig, roi_by_major["label"], gap=12)
+    fig.update_layout(bargap=0.55)
 show(zero_line(fig), st.container(border=True))
 
 with st.expander("Table view"):

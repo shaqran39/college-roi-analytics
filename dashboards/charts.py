@@ -56,6 +56,31 @@ def show(fig: go.Figure, where=st) -> None:
     where.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
 
+def is_phone() -> bool:
+    """True when the browser is a phone (its user agent says 'Mobi', as iPhone and Android phones do).
+
+    A chart can't see the screen width, so horizontal charts use this to switch to a phone layout;
+    desktop and tablets keep the normal one.
+    """
+    try:
+        return "Mobi" in (st.context.headers.get("User-Agent") or "")
+    except Exception:  # no browser (e.g. a test run)
+        return False
+
+
+def names_above_rows(fig: go.Figure, labels, gap: int) -> go.Figure:
+    """Phone layout for a horizontal chart: each row's name goes just above its bar / dots instead of in a
+    column on the left, so the plot gets the whole screen width. gap = pixels from the row's middle.
+    Call it after style(): it also cuts the x axis to 3-4 ticks."""
+    fig.update_yaxes(showticklabels=False)
+    for label in labels:
+        fig.add_annotation(x=0, xref="paper", y=label, text=label, showarrow=False,
+                           xanchor="left", yanchor="bottom", yshift=gap, font=dict(size=FONT_SIZE))
+    fig.update_xaxes(nticks=4)
+    fig.update_layout(margin_l=8)
+    return fig
+
+
 def zero_line(fig: go.Figure, axis: str = "x") -> go.Figure:
     """A solid hairline at 0: left/below it = worse off than not going to college."""
     if axis == "x":

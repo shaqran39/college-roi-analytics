@@ -3,7 +3,7 @@
 import plotly.graph_objects as go
 import streamlit as st
 
-from charts import BLUE, GREY, ORANGE, RED, show, style, zero_line
+from charts import BLUE, GREY, ORANGE, RED, is_phone, names_above_rows, show, style, zero_line
 from db import data_updated, load_mart, money, page_header
 
 TIER_NAMES = {
@@ -124,6 +124,8 @@ low, high = wide[["without", "with"]].min().min(), wide[["without", "with"]].max
 fig.update_xaxes(title_text="Median 10-year net return (US$)", range=[min(low, 0) * 1.1, high * 1.1])
 style(fig, height=60 * len(wide) + 80)
 fig.update_layout(showlegend=True, legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0), margin=dict(r=100, t=44))
+if is_phone():  # names above the dots, so the dots get the full width
+    names_above_rows(fig, wide["label"], gap=10)
 show(fig, st.container(border=True))
 
 with st.expander("Table view"):

@@ -3,7 +3,7 @@
 import plotly.graph_objects as go
 import streamlit as st
 
-from charts import BLUE, BLUE_LIGHT, show, style, zero_line
+from charts import BLUE, BLUE_LIGHT, is_phone, names_above_rows, show, style, zero_line
 from db import data_updated, load_mart, md_safe, money, page_header, pretty
 
 TIER_NAMES = {
@@ -117,7 +117,11 @@ fig.add_trace(go.Scatter(
     ),
 ))
 fig.update_xaxes(title_text="10-year net return (US$)")
-show(zero_line(style(fig, height=32 * len(spread) + 100)), st.container(border=True))
+phone = is_phone()
+style(fig, height=(48 if phone else 32) * len(spread) + 100)
+if phone:  # names above the lines, so the lines get the full width
+    names_above_rows(fig, spread["label"], gap=8)
+show(zero_line(fig), st.container(border=True))
 
 with st.expander("Table view"):
     st.dataframe(
