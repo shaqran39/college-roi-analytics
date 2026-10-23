@@ -7,6 +7,7 @@ or from a laptop for testing:
     python auto_insights/profile_upload.py               # profile the newest CSV
     python auto_insights/profile_upload.py --setup-only  # just create the schema, volume and tables
     python auto_insights/profile_upload.py --cleanup-dry-run  # show what the clean-up WOULD delete, delete nothing
+    python auto_insights/profile_upload.py --as-example data/raw/cafe_sales_test.csv  # create the pinned Example (once)
 
 All work is SQL sent through run_sql(). In the Job it uses spark.sql; on a laptop it uses
 databricks-sql-connector with the env vars DATABRICKS_HOST, DATABRICKS_HTTP_PATH, DATABRICKS_TOKEN.
@@ -16,22 +17,28 @@ Column names can't be parameters, so they are cleaned to snake_case and backtick
 Separate from the college ROI pipeline: it only touches workspace.raw.auto_landing
 and the workspace.auto_insights schema.
 
-After each successful run it cleans up (see cleanup()): "latest upload only", so every CSV in
-auto_landing except the newest, and every older upload's rows in workspace.auto_insights, are deleted.
+Each upload is private: the dashboard shows it only to the person who uploaded it (or anyone with its
+private link), for 24 hours. After each successful run it cleans up (see cleanup()): the CSV it just
+profiled, any CSV left in auto_landing for over an hour, and every upload's rows in workspace.auto_insights
+once they're over 24 hours old. The Example (upload_id 'example') is never deleted.
 This is the ONLY code in the project allowed to delete.
 """
 
 import argparse
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 LANDING_PATH = "/Volumes/workspace/raw/auto_landing/"
 SCHEMA = "workspace.auto_insights"
 AI_MODEL = "databricks-meta-llama-3-3-70b-instruct"
 
-# clean-up after each successful run: keep ONLY the newest CSV and ONLY the newest upload's results,
-# however recent the older ones are (each new upload replaces the previous one)
+# clean-up after each successful run (see cleanup())
+RESULTS_KEEP_HOURS = 24     # an upload's results (and its private link) last this long
+LEFTOVER_CSV_HOURS = 1      # a CSV still in auto_landing after this long was never profiled: delete it
+EXAMPLE_ID = "example"      # the pinned Example everyone sees by default; the clean-up never deletes it
+EXAMPLE_VOLUME = "workspace.auto_insights.example_data"     # NOT auto_landing, so it doesn't start the Job
+EXAMPLE_PATH = "/Volumes/workspace/auto_insights/example_data/"
 
 MAX_COLUMNS = 50            # profile at most the first 50 columns
 MAX_ROWS = 1_000_000        # bigger files are profiled on a random sample of this many rows
@@ -430,10 +437,18 @@ def fmt(value: float | None) -> str:
     return f"{value:,.0f}" if abs(value) >= 1000 or float(value).is_integer() else f"{value:,.2f}"
 
 
+def display_name(file_name: str) -> str:
+    """'upload_20261020T051324Z_<random part>_my_sales.csv' -> 'my_sales.csv' (other names are unchanged).
+
+    The random part is what keeps a private link unguessable, so it never goes into the AI report.
+    """
+    return re.sub(r"^upload_[0-9]{8}T[0-9]{6}Z_[A-Za-z0-9_-]{22}_", "", file_name)
+
+
 def build_facts(upload: dict, columns: list[dict], top: list[dict], corr: list[dict], groups: list[dict]) -> str:
     """Compact text of facts from the profile. id / free-text columns are only named, never described."""
     lines = [
-        f"File: {upload['file_name']}",
+        f"File: {display_name(upload['file_name'])}",
         f"Rows: {upload['row_count']:,}. Columns: {upload['column_count']}"
         + (f" (first {upload['profiled_column_count']} profiled)" if upload["profiled_column_count"] < upload["column_count"] else "")
         + ".",
@@ -511,76 +526,75 @@ def delete_file(path: str) -> None:
         ).files.delete(path)
 
 
-def cleanup(dry_run: bool = False) -> None:
-    """Keep only the latest upload. With dry_run=True, only print what WOULD be deleted.
+def cleanup(processed_path: str | None = None, dry_run: bool = False) -> None:
+    """Retention. With dry_run=True, only print what WOULD be deleted.
 
-    - Every CSV in auto_landing except the newest one.
-    - Rows in every workspace.auto_insights table (the ones with an upload_id) for every upload older
-      than the newest finished upload.
-    latest_upload and profile_sample hold no upload_id (they're replaced every run), so they're left alone.
+    1. processed_path: the CSV this run just profiled (its results are saved, so the file isn't needed).
+    2. Any other CSV in auto_landing older than LEFTOVER_CSV_HOURS (never the one being processed).
+    3. Rows in every workspace.auto_insights table (the ones with an upload_id) for uploads older than
+       RESULTS_KEEP_HOURS. Never the Example. latest_upload and profile_sample hold no upload_id
+       (they're replaced every run), so they're left alone.
+    Each step has its own try/except: a problem only prints a warning, and the next step still runs.
     """
     verb = "Would delete" if dry_run else "Deleted"
     print("\nClean-up" + (" (DRY RUN: nothing is deleted)" if dry_run else ""))
+    now = datetime.now(timezone.utc)
 
-    # 1. every CSV but the newest (list_csvs is newest first, so [1:] always skips the newest)
-    old_files = list_csvs()[1:]
-    for path, name, modified in old_files:
-        if not dry_run:
-            delete_file(path)
-        print(f"  {verb} file {name} (last changed {modified:%Y-%m-%d %H:%M} UTC)")
-    if not old_files:
-        print("  No older CSV files to delete (only the newest is there).")
+    # 1. the CSV just profiled
+    if processed_path:
+        try:
+            if not dry_run:
+                delete_file(processed_path)
+            print(f"  {verb} the profiled file {processed_path.rsplit('/', 1)[-1]}")
+        except Exception as error:
+            print(f"  WARNING: couldn't delete the profiled file: {error}")
 
-    # 2. every upload older than the newest finished one. upload_id starts with the run time
-    # (20260920_101500_<file name>), so "<" means older; it also catches leftover rows from a run that
-    # failed before it wrote its uploads row, and never touches a newer run that's still going
-    newest = run_sql(f"select upload_id from {SCHEMA}.uploads order by loaded_at desc limit 1")
-    if not newest:
-        print("  No finished uploads yet, so no results are deleted.")
-        return
-    params = {"keep": newest[0]["upload_id"]}
-    where = "upload_id rlike '^[0-9]{8}_[0-9]{6}_' and upload_id < :keep"
+    # 2. leftover CSVs (e.g. an upload that never got profiled)
+    try:
+        cutoff = now - timedelta(hours=LEFTOVER_CSV_HOURS)
+        old_files = [
+            (path, name, modified) for path, name, modified in list_csvs()
+            if modified < cutoff and path != processed_path
+        ]
+        for path, name, modified in old_files:
+            if not dry_run:
+                delete_file(path)
+            print(f"  {verb} leftover file {name} (last changed {modified:%Y-%m-%d %H:%M} UTC)")
+        if not old_files:
+            print(f"  No CSV files older than {LEFTOVER_CSV_HOURS} hour(s) in auto_landing.")
+    except Exception as error:
+        print(f"  WARNING: couldn't clean up leftover files: {error}")
 
-    # uploads first, so the dashboard stops listing an upload before its details go
-    total = 0
-    for table in ["uploads"] + [t for t in TABLES if t != "uploads"]:
-        found = run_sql(
-            f"select count(*) as n, count(distinct upload_id) as uploads, "
-            f"array_join(array_sort(collect_set(upload_id)), ', ') as ids from {SCHEMA}.{table} where {where}",
-            params,
-        )[0]
-        if not found["n"]:
-            continue
-        if not dry_run:
-            run_sql(f"delete from {SCHEMA}.{table} where {where}", params)
-        total += found["n"]
-        print(f"  {verb} {found['n']:,} rows from {table} ({found['uploads']} uploads: {found['ids']})")
-    if not total:
-        print(f"  No older uploads to delete (keeping only {params['keep']}).")
+    # 3. results older than RESULTS_KEEP_HOURS. upload_id starts with the run time (20260920_101500_<file name>),
+    # so "<" the cutoff means older. That also catches leftover rows from a run that failed before it wrote
+    # its uploads row. 'example' doesn't start with a time, and is excluded by name as well.
+    try:
+        params = {"cutoff": f"{now - timedelta(hours=RESULTS_KEEP_HOURS):%Y%m%d_%H%M%S}", "example": EXAMPLE_ID}
+        where = "upload_id <> :example and upload_id rlike '^[0-9]{8}_[0-9]{6}_' and upload_id < :cutoff"
+        # uploads first, so a private link stops working before the details go
+        total = 0
+        for table in ["uploads"] + [t for t in TABLES if t != "uploads"]:
+            found = run_sql(
+                f"select count(*) as n, count(distinct upload_id) as uploads, "
+                f"array_join(array_sort(collect_set(upload_id)), ', ') as ids from {SCHEMA}.{table} where {where}",
+                params,
+            )[0]
+            if not found["n"]:
+                continue
+            if not dry_run:
+                run_sql(f"delete from {SCHEMA}.{table} where {where}", params)
+            total += found["n"]
+            print(f"  {verb} {found['n']:,} rows from {table} ({found['uploads']} uploads: {found['ids']})")
+        if not total:
+            print(f"  No results older than {RESULTS_KEEP_HOURS} hours (the Example is always kept).")
+    except Exception as error:
+        print(f"  WARNING: couldn't clean up old results: {error}")
 
 
 # ---------- main ----------
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--setup-only", action="store_true", help="only create the volume, schema and tables")
-    parser.add_argument("--cleanup-dry-run", action="store_true", help="only show what the clean-up would delete")
-    args = parser.parse_args()
-
-    if args.cleanup_dry_run:
-        cleanup(dry_run=True)
-        return
-
-    setup()
-    if args.setup_only:
-        print(f"Set up {SCHEMA} and the volume {LANDING_PATH}")
-        return
-
-    file_path, file_name = newest_csv()
-    print(f"Newest CSV: {file_name}")
-    loaded_at = datetime.now(timezone.utc)
-    upload_id = f"{loaded_at:%Y%m%d_%H%M%S}_{file_name}"
-
+def profile(file_path: str, file_name: str, upload_id: str, loaded_at: datetime) -> None:
+    """Profile one CSV, write the AI report, and record it in uploads (last, so only finished uploads show)."""
     all_columns = load_latest(file_path)
     row_count = int(run_sql(f"select count(*) as n from {SCHEMA}.latest_upload")[0]["n"])
     if row_count == 0:
@@ -632,11 +646,56 @@ def main() -> None:
     insert_rows("uploads", [upload])
     print(f"Done: {upload_id}\n\n{report}")
 
-    # the profile is saved, so a clean-up problem must not fail the run: warn and carry on
-    try:
-        cleanup()
-    except Exception as error:
-        print(f"WARNING: clean-up failed (the profile above was saved fine): {error}")
+
+def create_example(local_csv: str) -> None:
+    """Create the pinned Example (upload_id 'example') from a local CSV, once. Run from a laptop.
+
+    The CSV is copied to its own volume, not auto_landing, so it doesn't start the Job.
+    If the Example already exists, nothing happens (this never deletes or replaces it).
+    """
+    if run_sql(f"select 1 from {SCHEMA}.uploads where upload_id = :example", {"example": EXAMPLE_ID}):
+        print("The Example already exists, so nothing was changed.")
+        return
+    from databricks.sdk import WorkspaceClient
+
+    run_sql(f"create volume if not exists {EXAMPLE_VOLUME}")
+    file_name = os.path.basename(local_csv)
+    file_path = EXAMPLE_PATH + file_name
+    with open(local_csv, "rb") as file:
+        WorkspaceClient(
+            host="https://" + os.environ["DATABRICKS_HOST"].removeprefix("https://").rstrip("/"),
+            token=os.environ["DATABRICKS_TOKEN"],
+        ).files.upload(file_path, file, overwrite=True)
+    print(f"Copied {local_csv} to {file_path}")
+    profile(file_path, file_name, EXAMPLE_ID, datetime.now(timezone.utc))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--setup-only", action="store_true", help="only create the volume, schema and tables")
+    parser.add_argument("--cleanup-dry-run", action="store_true", help="only show what the clean-up would delete")
+    parser.add_argument("--as-example", metavar="CSV", help="create the pinned Example from this local CSV (once)")
+    args = parser.parse_args()
+
+    if args.cleanup_dry_run:
+        cleanup(dry_run=True)
+        return
+
+    setup()
+    if args.setup_only:
+        print(f"Set up {SCHEMA} and the volume {LANDING_PATH}")
+        return
+    if args.as_example:
+        create_example(args.as_example)
+        return
+
+    file_path, file_name = newest_csv()
+    print(f"Newest CSV: {file_name}")
+    loaded_at = datetime.now(timezone.utc)
+    profile(file_path, file_name, f"{loaded_at:%Y%m%d_%H%M%S}_{file_name}", loaded_at)
+
+    # the profile is saved, so a clean-up problem must not fail the run (cleanup() only prints warnings)
+    cleanup(processed_path=file_path)
 
 
 if __name__ == "__main__":

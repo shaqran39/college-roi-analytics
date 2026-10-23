@@ -1,21 +1,62 @@
 """Page 5: Auto insights. The automatic profile, charts and AI report for any uploaded CSV.
 
 Reads only the workspace.auto_insights tables written by auto_insights/profile_upload.py.
-Only the newest upload is shown (the clean-up keeps only that one); its upload_id goes into
-every query as a parameter. Uploading a new CSV needs a password
-(see uploader.py); viewing is public.
+Each upload is private. The page shows exactly one upload, picked in this order:
+  1. a valid private link (?report=<upload_id>, under 24 hours old)
+  2. this browser session's own upload (st.session_state.my_upload_id)
+  3. the pinned Example (upload_id 'example', made-up café data)
+There's no list or picker, so nobody can browse other people's uploads. The upload_id always goes
+into queries as a parameter. Uploading a new CSV needs a password (see uploader.py).
 """
+
+import re
+from datetime import timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from charts import BLUE, style
-from db import md_safe, pretty, run_query
-from uploader import upload_box, upload_status
+from db import md_safe, pretty, query_now, run_query
+from uploader import display_name, upload_box, upload_status
 
 SCHEMA = "workspace.auto_insights"
 TYPE_LABELS = {"numeric": "Numeric", "categorical": "Category", "date": "Date", "id_text": "ID / free text"}
+EXAMPLE_ID = "example"
+LINK_HOURS = 24  # keep in step with RESULTS_KEEP_HOURS in auto_insights/profile_upload.py
+# <run time>_upload_<upload time>_<22 random characters>_<clean name>.csv (see landing_name in uploader.py)
+REPORT_ID = re.compile(r"[0-9]{8}_[0-9]{6}_upload_[0-9]{8}T[0-9]{6}Z_[A-Za-z0-9_-]{22}_[a-z0-9_]{1,60}\.csv")
+
+
+def as_utc(value) -> pd.Timestamp:
+    """A loaded_at value as a UTC timestamp (Databricks returns it without a time zone)."""
+    stamp = pd.Timestamp(value)
+    return stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+
+
+def private_upload(report_id) -> pd.Series | None:
+    """The uploads row for a private upload_id, or None if it's malformed, unknown or over 24 hours old.
+
+    The format is checked before anything is sent to Databricks. The lookup is live (not cached),
+    so an expired link stops working on time; a found row is remembered for this session only.
+    """
+    if not isinstance(report_id, str) or not REPORT_ID.fullmatch(report_id):
+        return None
+    checked = st.session_state.setdefault("checked_uploads", {})
+    if report_id not in checked:
+        try:
+            found = query_now(
+                f"select * from {SCHEMA}.uploads where upload_id = :upload_id "
+                f"and loaded_at >= current_timestamp() - interval {LINK_HOURS} hours",
+                params={"upload_id": report_id},
+            )
+        except Exception:
+            return None
+        if found.empty:
+            return None
+        checked[report_id] = found.iloc[0]
+    upload = checked[report_id]
+    return upload if as_utc(upload["loaded_at"]) + timedelta(hours=LINK_HOURS) > pd.Timestamp.now(tz="UTC") else None
 
 
 def for_upload(table: str, upload_id: str, order_by: str):
@@ -44,29 +85,51 @@ def footer() -> None:
 st.title("Auto insights")
 st.markdown(
     "An automatic first look at **any CSV**: what's in it, how complete it is, the main patterns, "
-    "and a short AI-written report. Each CSV uploaded below (password needed) or dropped into the Databricks "
-    "`auto_landing` folder is profiled by a job."
+    "and a short AI-written report. Upload a CSV below (password needed) and only you see the results, "
+    "for 24 hours."
 )
 upload_box()
 upload_status()
 
-try:
-    uploads = run_query(f"select * from {SCHEMA}.uploads order by loaded_at desc limit 1")
-except Exception:
-    uploads = None
-if uploads is None or uploads.empty:
-    st.info(
-        "No uploads yet. When a CSV is dropped into the `auto_landing` folder in Databricks, "
-        "its profile and AI report will appear here a few minutes later.",
-        icon=":material/upload_file:",
-    )
-    footer()
+# pick the ONE upload to show: a valid private link, else this session's own upload, else the Example
+state = st.session_state
+upload = None
+link = st.query_params.get("report")
+if link is not None:
+    upload = private_upload(link)
+    if upload is None:
+        st.warning(
+            "That report link doesn't work. It may be mistyped, or more than 24 hours old "
+            "(results are deleted after that). Here's the example instead.",
+            icon=":material/link_off:",
+        )
+        del st.query_params["report"]
+if upload is None and state.get("my_upload_id"):
+    upload = private_upload(state.my_upload_id)
+    if upload is None:
+        st.info("Your upload is more than 24 hours old, so its results have been deleted.")
+        state.my_upload_id = None
 
-# the newest upload only; when a new one is ready, the upload tracker clears the cache and reruns the page
-upload = uploads.iloc[0]
-upload_id = upload["upload_id"]
-st.markdown(f"**{upload['file_name']}** (profiled {upload['loaded_at']:%d %b %Y, %H:%M} UTC)")
-st.caption("Showing the latest upload. Each new upload replaces the previous one.")
+if upload is not None:
+    upload_id = upload["upload_id"]
+    expires = as_utc(upload["loaded_at"]) + timedelta(hours=LINK_HOURS)
+    st.markdown(f"**{display_name(upload['file_name'])}** (profiled {upload['loaded_at']:%d %b %Y, %H:%M} UTC)")
+    with st.container(border=True):
+        st.markdown(":material/lock: **Private report.** Only people with this link can see it:")
+        st.code(f"{st.context.url}?report={upload_id}", language=None, wrap_lines=True)
+        st.caption(f"The link works until {expires:%d %b %Y, %H:%M} UTC. After that the results are deleted.")
+else:
+    try:
+        example = run_query(f"select * from {SCHEMA}.uploads where upload_id = :upload_id", params={"upload_id": EXAMPLE_ID})
+    except Exception:
+        example = None
+    if example is None or example.empty:
+        st.info("Upload a CSV above to see its profile and AI report here.", icon=":material/upload_file:")
+        footer()
+    upload = example.iloc[0]
+    upload_id = EXAMPLE_ID
+    st.markdown("#### Example (made-up café data)")
+    st.caption("This is what a report looks like, using a made-up file of café sales. Upload your own CSV above to see yours.")
 
 profile = for_upload("column_profile", upload_id, "column_position")
 top_values = for_upload("top_values", upload_id, "column_name, value_rank")

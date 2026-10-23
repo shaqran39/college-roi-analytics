@@ -4,11 +4,16 @@ Viewing the page is public; uploading needs st.secrets["upload_password"].
 The file is saved to the auto_landing volume with its own, write-only token
 (st.secrets["databricks_upload_token"]), never the dashboard's read token.
 The Databricks Job auto_insights_refresh notices the new file and profiles it.
+
+Each upload is private: its file name gets a random part, so its upload_id (and the ?report= link
+made from it) can't be guessed. Only this browser session (st.session_state.my_upload_id) and
+anyone given the link can see it, for 24 hours.
 """
 
 import hmac
 import io
 import re
+import secrets
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,7 +21,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from db import query_now, run_query
+from db import query_now
 
 LANDING_PATH = "/Volumes/workspace/raw/auto_landing/"
 MAX_MB = 10                 # keep in step with server.maxUploadSize in .streamlit/config.toml
@@ -56,9 +61,14 @@ def check_csv(data: bytes) -> str | None:
 
 
 def landing_name(original: str, now: datetime) -> str:
-    """'My Sales (Q3).CSV' -> 'upload_20261020T051324Z_my_sales_q3.csv'."""
+    """'My Sales (Q3).CSV' -> 'upload_20261020T051324Z_<22 random characters>_my_sales_q3.csv'."""
     clean = re.sub(r"[^a-z0-9]+", "_", Path(original).stem.lower()).strip("_")[:60].strip("_") or "file"
-    return f"upload_{now:%Y%m%dT%H%M%SZ}_{clean}.csv"
+    return f"upload_{now:%Y%m%dT%H%M%SZ}_{secrets.token_urlsafe(16)}_{clean}.csv"
+
+
+def display_name(file_name: str) -> str:
+    """'upload_20261020T051324Z_<random part>_my_sales.csv' -> 'my_sales.csv', so the random part stays out of sight."""
+    return re.sub(r"^upload_[0-9]{8}T[0-9]{6}Z_[A-Za-z0-9_-]{22}_", "", file_name)
 
 
 def save_to_volume(file_name: str, data: bytes) -> None:
@@ -104,7 +114,11 @@ def upload_box() -> None:
             st.info(f"You can upload another file in {minutes(wait)} minutes.")
             return
 
-        st.warning("Uploads become public on this page. Use only public or made-up data.", icon=":material/public:")
+        st.info(
+            "Only you (and anyone you share its private link with) can see your results. "
+            "They're deleted after 24 hours. Still, use only public or made-up data.",
+            icon=":material/lock:",
+        )
         file = st.file_uploader(f"CSV file (max {MAX_MB} MB)", type="csv", max_upload_size=MAX_MB)
         st.caption("Uploads are processed one at a time, so if another one is running, yours waits in the queue.")
         if file is None or not st.button("Upload and profile", type="primary"):
@@ -124,18 +138,45 @@ def upload_box() -> None:
             return
         state.pending_upload = {"file_name": file_name, "started": time.time()}
         state.last_upload_at = time.time()
+        state.late_upload = None
         state.pop("upload_message", None)
         st.rerun()
 
 
 def upload_status() -> None:
     """While an upload is processing, a live tracker; afterwards, a one-line result."""
-    if st.session_state.get("pending_upload"):
+    state = st.session_state
+    if state.get("pending_upload"):
         _tracker()
-    message = st.session_state.get("upload_message")
+    message = state.get("upload_message")
     if message:
         kind, text = message
         (st.success if kind == "done" else st.warning)(text)
+    # the tracker gave up, but the upload may still finish: one check per click
+    late = state.get("late_upload")
+    if late and st.button("Check again", icon=":material/refresh:"):
+        if not _found(late):
+            st.info("Not ready yet. Try again in a few minutes.")
+
+
+def _found(file_name: str) -> bool:
+    """If this session's upload has finished, remember it, make the URL its private link and rerun."""
+    state = st.session_state
+    try:
+        found = query_now(
+            "select upload_id from workspace.auto_insights.uploads where file_name = :file_name "
+            "order by loaded_at desc limit 1",
+            params={"file_name": file_name},
+        )
+    except Exception:
+        return False  # a failed check just waits for the next one
+    if found.empty:
+        return False
+    state.my_upload_id = found.iloc[0]["upload_id"]
+    st.query_params["report"] = state.my_upload_id
+    state.upload_message = ("done", f"**{display_name(file_name)}** is ready. It's shown below.")
+    state.pending_upload = state.late_upload = None
+    st.rerun()
 
 
 @st.fragment(run_every=POLL_SECONDS)
@@ -146,28 +187,18 @@ def _tracker() -> None:
     if not pending:
         return
     elapsed = time.time() - pending["started"]
+    name = display_name(pending["file_name"])
 
-    try:
-        found = query_now(
-            "select upload_id from workspace.auto_insights.uploads where file_name = :file_name "
-            "order by loaded_at desc limit 1",
-            params={"file_name": pending["file_name"]},
-        )
-    except Exception:
-        found = None  # a failed check just waits for the next one
-    if found is not None and not found.empty:
-        run_query.clear()  # so the page rerun below shows the new upload (the newest one) right away
-        state.upload_message = ("done", f"**{pending['file_name']}** is ready. It's shown below.")
-        state.pending_upload = None
-        st.rerun()
+    _found(pending["file_name"])
     if elapsed > GIVE_UP_SECONDS:
-        state.upload_message = ("slow", f"**{pending['file_name']}**: this is taking longer than usual, check back later.")
+        state.upload_message = ("slow", f"**{name}**: this is taking longer than usual. Keep this tab open and check again later.")
+        state.late_upload = pending["file_name"]
         state.pending_upload = None
         st.rerun()
 
     # the steps are estimated from the time since upload (the app can't see inside the Job)
     starting = elapsed < START_SECONDS
-    with st.status(f"Profiling **{pending['file_name']}** · {minutes(elapsed)} elapsed", state="running"):
+    with st.status(f"Profiling **{name}** · {minutes(elapsed)} elapsed", state="running"):
         st.markdown(
             ":material/check_circle: File received\n\n"
             + (":material/pending: **Waiting for Databricks to start**\n\n:material/radio_button_unchecked: Processing"
