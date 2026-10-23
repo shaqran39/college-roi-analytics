@@ -5,7 +5,7 @@ Run locally from the project root:  streamlit run dashboards/app.py
 
 import streamlit as st
 
-from db import data_updated, refresh_button
+from db import refresh_button
 
 st.set_page_config(page_title="Does College Pay Off?", page_icon="🎓", layout="wide")
 
@@ -26,9 +26,6 @@ with st.sidebar:
     st.caption("An end-to-end analytics project: 30,000 synthetic graduates through Databricks, dbt and AI, "
                "plus a page to analyse any CSV.")
     refresh_button()
-    updated = data_updated()
-    if updated:
-        st.caption(f":material/update: College data updated {updated}")
 
 page.run()
 
