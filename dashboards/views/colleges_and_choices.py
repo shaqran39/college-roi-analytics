@@ -3,8 +3,8 @@
 import plotly.graph_objects as go
 import streamlit as st
 
-from charts import BLUE, BLUE_DARK, BLUE_LIGHT, GREY, RED, style, zero_line
-from db import load_mart, money
+from charts import BLUE, GREY, ORANGE, RED, show, style, zero_line
+from db import data_updated, load_mart, money, page_header
 
 TIER_NAMES = {
     "ivy_elite": "Ivy / elite",
@@ -20,11 +20,15 @@ tiers["label"] = tiers["institution_tier"].map(TIER_NAMES)
 tiers = tiers.set_index("institution_tier").loc[list(TIER_NAMES)].reset_index()
 choices = load_mart("mart_choices_effect")
 
-st.title("Colleges & choices")
+page_header(
+    "Colleges & choices",
+    "Does the type of college matter, and how much did internships and finishing on time change the result?",
+    data_updated(),
+)
 
 # tier comparison: three small charts side by side instead of one chart with mixed scales
 st.subheader("By type of college")
-st.markdown("The typical (median) result for graduates of each type of college.")
+st.caption("The typical (median) result for graduates of each type of college.")
 
 
 def tier_bar(column: str, title: str, text, hover: str, color: str = BLUE) -> go.Figure:
@@ -41,20 +45,20 @@ def tier_bar(column: str, title: str, text, hover: str, color: str = BLUE) -> go
 
 
 col1, col2, col3 = st.columns(3)
-col1.plotly_chart(
-    zero_line(tier_bar("median_net_roi_usd", "Typical 10-year net return",
+show(
+    zero_line(tier_bar("median_net_roi_usd", "Typical 10-year net return (US$)",
                        tiers["median_net_roi_usd"].map(money), "Typical net return: US$%{x:,.0f}")),
-    width="stretch",
+    col1.container(border=True),
 )
-col2.plotly_chart(
+show(
     tier_bar("pct_roi_negative", "% worse off than no college",
              tiers["pct_roi_negative"].map(lambda v: f"{v}%"), "Worse off: %{x}%", color=RED),
-    width="stretch",
+    col2.container(border=True),
 )
-col3.plotly_chart(
-    tier_bar("median_debt_usd", "Typical debt at graduation",
+show(
+    tier_bar("median_debt_usd", "Typical debt at graduation (US$)",
              tiers["median_debt_usd"].map(money), "Median debt: US$%{x:,.0f}"),
-    width="stretch",
+    col3.container(border=True),
 )
 
 with st.expander("Table view"):
@@ -101,8 +105,9 @@ fig = go.Figure()
 for _, row in wide.iterrows():  # grey connector between the two dots
     fig.add_trace(go.Scatter(x=[row["without"], row["with"]], y=[row["label"]] * 2, mode="lines",
                              line=dict(color=GREY, width=2), hoverinfo="skip", showlegend=False))
-for side, color, name in [("without", BLUE_LIGHT, f"Without {CHOICE_NAMES[choice].lower()}"),
-                          ("with", BLUE_DARK, f"With {CHOICE_NAMES[choice].lower()}")]:
+# orange / blue: a colour-blind-safe pair; the legend and the +/- labels carry the meaning too
+for side, color, name in [("without", ORANGE, f"Without {CHOICE_NAMES[choice].lower()}"),
+                          ("with", BLUE, f"With {CHOICE_NAMES[choice].lower()}")]:
     fig.add_trace(go.Scatter(
         x=wide[side], y=wide["label"], mode="markers", name=name,
         marker=dict(color=color, size=12, line=dict(color="white", width=2)),
@@ -114,10 +119,12 @@ for _, row in wide.iterrows():
     fig.add_annotation(x=max(row["with"], row["without"]), y=row["label"], text=f"{'+' if row['difference'] >= 0 else ''}{money(row['difference'])}",
                        showarrow=False, xanchor="left", xshift=12, font=dict(size=12))
 fig.update_yaxes(autorange="reversed")
-fig.update_xaxes(title_text="Median 10-year net return (US$)")
+# a fixed range from the data: on a narrow phone, Plotly's automatic range stretched far past the dots
+low, high = wide[["without", "with"]].min().min(), wide[["without", "with"]].max().max()
+fig.update_xaxes(title_text="Median 10-year net return (US$)", range=[min(low, 0) * 1.1, high * 1.1])
 style(fig, height=60 * len(wide) + 80)
 fig.update_layout(showlegend=True, legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0), margin=dict(r=100, t=44))
-st.plotly_chart(fig, width="stretch")
+show(fig, st.container(border=True))
 
 with st.expander("Table view"):
     st.dataframe(

@@ -3,8 +3,8 @@
 import plotly.graph_objects as go
 import streamlit as st
 
-from charts import BLUE, BLUE_LIGHT, GREY, style, zero_line
-from db import load_mart, md_safe, money, pretty
+from charts import BLUE, BLUE_LIGHT, show, style, zero_line
+from db import data_updated, load_mart, md_safe, money, page_header, pretty
 
 TIER_NAMES = {
     "ivy_elite": "Ivy / elite",
@@ -21,11 +21,15 @@ spread = load_mart("mart_outcome_spread_by_major").sort_values("median_net_roi_u
 what_if = load_mart("mart_what_if")
 roi_by_major = load_mart("mart_roi_by_major").set_index("major")
 
-st.title("Deep dive")
+page_header(
+    "Deep dive",
+    "How do GPA and debt go with the result, how spread out are the outcomes, and how did graduates like you do?",
+    data_updated(),
+)
 
 # GPA and debt vs ROI
 st.subheader("GPA and debt vs 10-year net return")
-st.markdown(
+st.caption(
     "The line is the typical (median) graduate in each group; the shaded band is the middle half "
     "of graduates (25th to 75th percentile). These compare groups and don't prove cause."
 )
@@ -59,8 +63,8 @@ def band_chart(dimension: str, x_title: str) -> go.Figure:
 
 
 col1, col2 = st.columns(2)
-col1.plotly_chart(band_chart("gpa", "GPA"), width="stretch")
-col2.plotly_chart(band_chart("debt", "Debt at graduation"), width="stretch")
+show(band_chart("gpa", "GPA"), col1.container(border=True))
+show(band_chart("debt", "Debt at graduation (US$)"), col2.container(border=True))
 
 # no-debt grads vs small-debt grads: worth calling out because it surprises people
 debt = bands[bands["dimension"] == "debt"].set_index("band_order")
@@ -91,7 +95,7 @@ with st.expander("Table view"):
 
 # spread of outcomes per major
 st.subheader("How spread out are the outcomes?")
-st.markdown(
+st.caption(
     "For each major: the thin line runs from the **worst case** (1 in 10 graduates did this badly or worse) "
     "to the **best case** (1 in 10 did this well or better). The thick bar is the middle half; the dot is the typical graduate."
 )
@@ -113,7 +117,7 @@ fig.add_trace(go.Scatter(
     ),
 ))
 fig.update_xaxes(title_text="10-year net return (US$)")
-st.plotly_chart(zero_line(style(fig, height=32 * len(spread) + 100)), width="stretch")
+show(zero_line(style(fig, height=32 * len(spread) + 100)), st.container(border=True))
 
 with st.expander("Table view"):
     st.dataframe(
@@ -135,7 +139,7 @@ with st.expander("Table view"):
 
 # What if
 st.subheader("What if…?")
-st.markdown("Pick a combination to see how graduates like that did in this data.")
+st.caption("Pick a combination to see how graduates like that did in this data.")
 
 c1, c2, c3, c4 = st.columns([3, 2, 2, 2], vertical_alignment="bottom")
 majors_best_first = roi_by_major.sort_values("median_net_roi_usd", ascending=False).index.tolist()
@@ -165,10 +169,13 @@ with st.container(border=True):
             "Typical 10-year net return", money(r["median_net_roi_usd"]),
             delta=f"{money(r['median_net_roi_usd'] - major_typical)} vs whole major",
             help="Median for this group, and the difference from the median of every graduate in the major.",
+            border=True,
         )
-        m2.metric("Worse off than no college", f"{r['pct_roi_negative']}%")
-        m3.metric("Median payback", f"{r['median_payback_years']} yrs")
-        m4.metric("Typical debt", money(r["median_debt_usd"]),
+        m2.metric("Worse off than no college", f"{r['pct_roi_negative']}%", border=True,
+                  help="Share of this group whose net return was below zero.")
+        m3.metric("Median payback", f"{r['median_payback_years']} yrs", border=True,
+                  help="Typical years until extra earnings covered the net cost of college.")
+        m4.metric("Typical debt", money(r["median_debt_usd"]), border=True,
                   help=f"Typical net cost of college for this group: {money(r['median_net_cost_usd'])}.")
         st.markdown(md_safe(
             f"Half of this group landed between **{money(r['p25_net_roi_usd'])}** and "

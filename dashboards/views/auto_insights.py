@@ -18,8 +18,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from charts import BLUE, GREY, ORANGE, style, zero_line
-from db import md_safe, pretty, query_now, run_query
+from charts import BLUE, GREY, ORANGE, show, style, zero_line
+from db import md_safe, page_header, pretty, query_now, run_query
 from uploader import display_name, upload_box, upload_status
 
 SCHEMA = "workspace.auto_insights"
@@ -183,7 +183,7 @@ def numeric_columns(histograms: pd.DataFrame, details: pd.DataFrame) -> None:
         fig.update_yaxes(title_text="Rows")
         style(fig, height=300, money_axis=None)
         with chart_columns[i % 2]:
-            st.plotly_chart(fig, width="stretch")
+            show(fig)
             if name in notes.index:
                 note = column_notes(notes.loc[name])
                 if note:
@@ -212,7 +212,7 @@ def category_columns(top_values: pd.DataFrame) -> None:
         fig.update_yaxes(type="category")  # values like "0" / "1" are labels, not numbers
         fig.update_xaxes(title_text="% of rows", range=[0, values["pct_of_rows"].max() * 1.15])
         style(fig, height=30 * len(values) + 110, money_axis=None)
-        chart_columns[i % 2].plotly_chart(fig, width="stretch")
+        show(fig, chart_columns[i % 2])
 
 
 def correlation_chart(correlations: pd.DataFrame) -> None:
@@ -232,7 +232,7 @@ def correlation_chart(correlations: pd.DataFrame) -> None:
     ))
     fig.update_xaxes(title_text="Pearson r", range=[-1.15, 1.15], tickvals=[-1, -0.5, 0, 0.5, 1])
     style(fig, height=34 * len(data) + 100, money_axis=None)
-    st.plotly_chart(zero_line(fig), width="stretch")
+    show(zero_line(fig))
     with st.expander("Table view"):
         st.dataframe(
             data.sort_values("correlation_rank")[["column_a", "column_b", "pearson_r", "strength"]],
@@ -266,7 +266,7 @@ def group_charts(groups: pd.DataFrame) -> None:
         fig.update_yaxes(autorange="reversed")
         fig.update_xaxes(title_text=f"Average {g.numeric_column.replace('_', ' ')}", range=[min(0, min(values)), max(values) * 1.2])
         style(fig, height=230, money_axis=None)
-        chart_columns[i % 2].plotly_chart(fig, width="stretch")
+        show(fig, chart_columns[i % 2])
     with st.expander("Table view"):
         st.dataframe(
             groups.assign(
@@ -353,25 +353,24 @@ def trends(series: pd.DataFrame, patterns: pd.DataFrame) -> None:
             choice = st.selectbox("Show", ["Rows"] + measures, key=f"trend_{date_column}",
                                   format_func=lambda m: f"Rows per {grain}" if m == "Rows" else m.capitalize())
             if choice == "Rows":
-                st.plotly_chart(trend_chart(periods, "row_count", grain, "Rows"), width="stretch")
+                show(trend_chart(periods, "row_count", grain, "Rows"))
             else:
                 points = rows[rows["measure_name"] == choice].sort_values("period_start")
-                st.plotly_chart(trend_chart(points, "measure_value", grain, choice.capitalize()), width="stretch")
+                show(trend_chart(points, "measure_value", grain, choice.capitalize()))
             found = patterns[patterns["date_column"] == date_column] if not patterns.empty else patterns
             kinds = [k for k in pattern_titles if not found.empty and (found["pattern_type"] == k).any()]
             chart_columns = st.columns(len(kinds)) if kinds else []
             for column, kind in zip(chart_columns, kinds):
                 pattern = found[found["pattern_type"] == kind].drop_duplicates("bucket_order").sort_values("bucket_order")
-                column.plotly_chart(pattern_chart(pattern, pattern_titles[kind]), width="stretch")
+                show(pattern_chart(pattern, pattern_titles[kind]), column)
 
 
 # ---------- the page ----------
 
-st.title("Auto insights")
-st.markdown(
-    "An automatic first look at **any CSV**: what's in it, how complete it is, the main patterns, "
-    "and a short AI-written report. Upload a CSV below (password needed) and only you see the results, "
-    "for 24 hours."
+updated_slot = page_header(
+    "Auto insights",
+    "What's in a CSV, how complete is it, and what are its main patterns? An automatic first look at **any CSV**, "
+    "with a short AI-written report. Upload one below (password needed) and only you see the results, for 24 hours.",
 )
 upload_box()
 upload_status()
@@ -415,6 +414,7 @@ else:
     upload_id = EXAMPLE_ID
     st.markdown("#### Example (made-up café data)")
     st.caption("This is what a report looks like, using a made-up file of café sales. Upload your own CSV above to see yours.")
+updated_slot.caption(f":material/update: Data updated {upload['loaded_at']:%d %b %Y} (when this file was profiled)")
 
 profile = for_upload("column_profile", upload_id, "column_position")
 details = for_upload("column_details", upload_id, "column_name")
